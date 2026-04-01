@@ -227,6 +227,13 @@ def build_skill_invocation_message(
         return f"[Failed to load skill: {skill_info['name']}]"
 
     loaded_skill, skill_dir, skill_name = loaded
+    # Fire-and-forget usage tracking for slash command invocations
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        db.record_skill_usage(skill_name, "slash_command", context_snippet=user_instruction[:200] if user_instruction else None)
+    except Exception:
+        pass
     activation_note = (
         f'[SYSTEM: The user has invoked the "{skill_name}" skill, indicating they want '
         "you to follow its instructions. The full skill content is loaded below.]"

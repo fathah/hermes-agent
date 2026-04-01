@@ -340,6 +340,16 @@ DEFAULT_CONFIG = {
         "max_ms": 2500,
     },
     
+    # Skills overflow management — cap how many tokens the skills index consumes
+    # in the system prompt and control which skills are always included.
+    # All defaults preserve existing behavior (unlimited, no archival).
+    "skills": {
+        "token_budget": 0,          # max tokens for skills index (0 = unlimited, recommended: 4000)
+        "max_prompt_skills": 0,     # hard cap on skill count (0 = unlimited)
+        "pinned_skills": [],        # always included regardless of budget
+        "auto_archive_days": 0,     # 0 = disabled; N = archive after N days of inactivity
+    },
+
     # Persistent memory -- bounded curated memory injected into system prompt
     "memory": {
         "memory_enabled": True,

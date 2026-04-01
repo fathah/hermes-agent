@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, Optional
@@ -88,6 +89,9 @@ VALID_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]*$')
 
 # Subdirectories allowed for write_file/remove_file
 ALLOWED_SUBDIRS = {"references", "templates", "scripts", "assets"}
+
+# Archive directory for auto-archived/manually archived skills
+ARCHIVE_DIR = SKILLS_DIR / ".archive"
 
 
 def check_skill_manage_requirements() -> bool:
@@ -161,15 +165,69 @@ def _resolve_skill_dir(name: str, category: str = None) -> Path:
 
 def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     """
-    Find a skill by name in ~/.hermes/skills/.
+    Find a skill by name in ~/.hermes/skills/ (excludes .archive).
     Returns {"path": Path} or None.
     """
     if not SKILLS_DIR.exists():
         return None
     for skill_md in SKILLS_DIR.rglob("SKILL.md"):
+        if ".archive" in skill_md.parts:
+            continue
         if skill_md.parent.name == name:
             return {"path": skill_md.parent}
     return None
+
+
+_DEDUP_STOPWORDS = frozenset({"", "a", "an", "the", "and", "or", "for", "to", "of", "in", "with", "is", "are"})
+
+
+def _find_similar_skills(name: str, content: str) -> list[str]:
+    """Find skills with similar names or descriptions. Returns up to 5 matches."""
+    # Get existing skills via the skills tool's listing (the public interface)
+    existing_skills: list[tuple[str, str]] = []  # (name, description)
+    try:
+        from tools.skills_tool import _find_all_skills
+        for s in _find_all_skills():
+            existing_skills.append((s.get("name", ""), s.get("description", "")))
+    except Exception:
+        pass
+    if not existing_skills:
+        return []
+
+    name_stem = set(re.sub(r"[-_.]", " ", name.lower()).split())
+
+    # Extract description from new skill's content frontmatter
+    new_desc_words: set[str] = set()
+    try:
+        if content.startswith("---"):
+            end_match = re.search(r"\n---\s*\n", content[3:])
+            if end_match:
+                fm_text = content[3:end_match.start() + 3]
+                parsed = yaml.safe_load(fm_text)
+                if isinstance(parsed, dict):
+                    new_desc_words = set(str(parsed.get("description", "")).lower().split()) - _DEDUP_STOPWORDS
+    except Exception:
+        pass
+
+    similar = []
+    for existing_name, existing_desc in existing_skills:
+        if existing_name == name:
+            continue
+        # Name stem overlap
+        existing_stem = set(re.sub(r"[-_.]", " ", existing_name.lower()).split())
+        if name_stem and existing_stem and name_stem & existing_stem:
+            similar.append(existing_name)
+            continue
+        # Description Jaccard similarity > 0.6
+        if new_desc_words and existing_desc:
+            ex_words = set(existing_desc.lower().split()) - _DEDUP_STOPWORDS
+            if ex_words:
+                intersection = new_desc_words & ex_words
+                union = new_desc_words | ex_words
+                if union and len(intersection) / len(union) > 0.6:
+                    similar.append(existing_name)
+
+    return similar[:5]
 
 
 def _validate_file_path(file_path: str) -> Optional[str]:
@@ -254,6 +312,9 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
             "error": f"A skill named '{name}' already exists at {existing['path']}."
         }
 
+    # Deduplication check — warn about similar existing skills
+    similar_skills = _find_similar_skills(name, content)
+
     # Create the skill directory
     skill_dir = _resolve_skill_dir(name, category)
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -280,6 +341,13 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         "To add reference files, templates, or scripts, use "
         "skill_manage(action='write_file', name='{}', file_path='references/example.md', file_content='...')".format(name)
     )
+    if similar_skills:
+        result["similar_skills"] = similar_skills
+        result["dedup_warning"] = (
+            f"Found {len(similar_skills)} similar existing skill(s): "
+            + ", ".join(similar_skills)
+            + ". Consider reviewing them to avoid duplication."
+        )
     return result
 
 
@@ -492,6 +560,132 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     }
 
 
+_BUNDLED_SKILL_NAMES: frozenset | None = None
+
+
+def _get_bundled_skill_names() -> frozenset:
+    """Return cached set of skill names bundled with the repo."""
+    global _BUNDLED_SKILL_NAMES
+    if _BUNDLED_SKILL_NAMES is not None:
+        return _BUNDLED_SKILL_NAMES
+    names: set[str] = set()
+    try:
+        repo_skills = Path(__file__).resolve().parent.parent / "skills"
+        if repo_skills.exists():
+            for candidate in repo_skills.rglob("SKILL.md"):
+                names.add(candidate.parent.name)
+    except Exception:
+        pass
+    _BUNDLED_SKILL_NAMES = frozenset(names)
+    return _BUNDLED_SKILL_NAMES
+
+
+def _is_bundled_skill(skill_dir: Path) -> bool:
+    """Check if a skill is bundled (shipped with the repo or has bundled: true)."""
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        return False
+    if skill_dir.name in _get_bundled_skill_names():
+        return True
+    try:
+        raw = skill_md.read_text(encoding="utf-8")[:1000]
+        if raw.startswith("---"):
+            end = re.search(r"\n---\s*\n", raw[3:])
+            if end:
+                fm_text = raw[3:end.start() + 3]
+                parsed = yaml.safe_load(fm_text)
+                if isinstance(parsed, dict) and parsed.get("bundled"):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _archive_skill(name: str) -> Dict[str, Any]:
+    """Move a skill to the archive directory."""
+    existing = _find_skill(name)
+    if not existing:
+        return {"success": False, "error": f"Skill '{name}' not found."}
+    skill_dir = existing["path"]
+
+    if _is_bundled_skill(skill_dir):
+        return {"success": False, "error": f"Cannot archive bundled skill '{name}'."}
+
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ARCHIVE_DIR / skill_dir.name
+    if dest.exists():
+        return {"success": False, "error": f"Archived skill '{name}' already exists. Restore or delete it first."}
+
+    shutil.move(str(skill_dir), str(dest))
+
+    # Clean up empty parent category directories
+    parent = skill_dir.parent
+    if parent != SKILLS_DIR and parent.exists() and not any(parent.iterdir()):
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+    return {
+        "success": True,
+        "message": f"Skill '{name}' archived to .archive/. Use action='restore' to bring it back.",
+    }
+
+
+def _restore_skill(name: str) -> Dict[str, Any]:
+    """Restore a skill from the archive directory."""
+    if not ARCHIVE_DIR.exists():
+        return {"success": False, "error": f"No archive directory found."}
+
+    archived_dir = ARCHIVE_DIR / name
+    if not archived_dir.exists():
+        # List available archived skills
+        available = [d.name for d in ARCHIVE_DIR.iterdir() if d.is_dir() and (d / "SKILL.md").exists()]
+        return {
+            "success": False,
+            "error": f"Skill '{name}' not found in archive.",
+            "archived_skills": available if available else None,
+        }
+
+    # Check for name collision with active skills
+    if _find_skill(name):
+        return {"success": False, "error": f"Active skill '{name}' already exists. Delete it first."}
+
+    dest = SKILLS_DIR / name
+    shutil.move(str(archived_dir), str(dest))
+
+    return {
+        "success": True,
+        "message": f"Skill '{name}' restored from archive.",
+    }
+
+
+def find_archivable_skills(cutoff_days: int, pinned: "set[str] | None" = None) -> list[str]:
+    """Return user-created skill names unused for more than cutoff_days."""
+    if not SKILLS_DIR.exists():
+        return []
+    pinned = pinned or set()
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+    except Exception:
+        return []
+
+    candidates = []
+    for skill_md in SKILLS_DIR.rglob("SKILL.md"):
+        if ".archive" in skill_md.parts:
+            continue
+        skill_name = skill_md.parent.name
+        if skill_name in pinned or _is_bundled_skill(skill_md.parent):
+            continue
+        last_used = db.get_skill_last_used(skill_name)
+        if last_used is not None:
+            if (time.time() - last_used) / 86400 <= cutoff_days:
+                continue
+        candidates.append(skill_name)
+    return candidates
+
+
 # =============================================================================
 # Main entry point
 # =============================================================================
@@ -544,13 +738,26 @@ def skill_manage(
             return json.dumps({"success": False, "error": "file_path is required for 'remove_file'."}, ensure_ascii=False)
         result = _remove_file(name, file_path)
 
+    elif action == "archive":
+        result = _archive_skill(name)
+
+    elif action == "restore":
+        result = _restore_skill(name)
+
     else:
-        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"}
+        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file, archive, restore"}
 
     if result.get("success"):
         try:
             from agent.prompt_builder import clear_skills_system_prompt_cache
             clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+        # Fire-and-forget usage tracking
+        try:
+            from hermes_state import SessionDB
+            db = SessionDB()
+            db.record_skill_usage(name, action)
         except Exception:
             pass
 
@@ -570,7 +777,7 @@ SKILL_MANAGE_SCHEMA = {
         "Actions: create (full SKILL.md + optional category), "
         "patch (old_string/new_string — preferred for fixes), "
         "edit (full SKILL.md rewrite — major overhauls only), "
-        "delete, write_file, remove_file.\n\n"
+        "delete, write_file, remove_file, archive, restore.\n\n"
         "Create when: complex task succeeded (5+ calls), errors overcome, "
         "user-corrected approach worked, non-trivial workflow discovered, "
         "or user asks you to remember a procedure.\n"
@@ -587,7 +794,7 @@ SKILL_MANAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
+                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file", "archive", "restore"],
                 "description": "The action to perform."
             },
             "name": {

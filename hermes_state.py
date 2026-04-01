@@ -32,7 +32,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -89,6 +89,17 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS skill_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    session_id TEXT,
+    timestamp REAL NOT NULL,
+    context_snippet TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_name ON skill_usage(skill_name);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_ts ON skill_usage(timestamp DESC);
 """
 
 FTS_SQL = """
@@ -330,6 +341,22 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                # v7: add skill_usage table for tracking skill views, invocations,
+                # and management actions — foundation for smart ranking and auto-archival.
+                cursor.executescript("""
+                    CREATE TABLE IF NOT EXISTS skill_usage (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        skill_name TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        session_id TEXT,
+                        timestamp REAL NOT NULL,
+                        context_snippet TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_skill_usage_name ON skill_usage(skill_name);
+                    CREATE INDEX IF NOT EXISTS idx_skill_usage_ts ON skill_usage(timestamp DESC);
+                """)
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -1272,3 +1299,105 @@ class SessionDB:
             return len(session_ids)
 
         return self._execute_write(_do)
+
+    # =========================================================================
+    # Skill usage tracking
+    # =========================================================================
+
+    # Purge skill_usage rows older than this many days on every Nth write.
+    _SKILL_USAGE_RETENTION_DAYS = 90
+    _SKILL_USAGE_PURGE_EVERY = 100
+
+    def record_skill_usage(
+        self,
+        skill_name: str,
+        event_type: str,
+        session_id: Optional[str] = None,
+        context_snippet: Optional[str] = None,
+    ) -> None:
+        """Record a skill usage event. Purges rows older than 90 days every 100 writes."""
+        snippet = (context_snippet or "")[:200] if context_snippet else None
+        def _do(conn):
+            conn.execute(
+                "INSERT INTO skill_usage (skill_name, event_type, session_id, timestamp, context_snippet) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (skill_name, event_type, session_id, time.time(), snippet),
+            )
+            if self._write_count % self._SKILL_USAGE_PURGE_EVERY == 0:
+                cutoff = time.time() - (self._SKILL_USAGE_RETENTION_DAYS * 86400)
+                conn.execute("DELETE FROM skill_usage WHERE timestamp < ?", (cutoff,))
+        try:
+            self._execute_write(_do)
+        except Exception as e:
+            logger.debug("Failed to record skill usage: %s", e)
+
+    def get_skill_usage_stats(self, since_days: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return usage stats per skill, optionally filtered by recency.
+
+        Returns list of dicts: [{skill_name, total_uses, last_used, event_counts}]
+        """
+        cutoff = time.time() - (since_days * 86400) if since_days else 0
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT skill_name, event_type, COUNT(*) as cnt, MAX(timestamp) as last_ts "
+                "FROM skill_usage WHERE timestamp > ? GROUP BY skill_name, event_type "
+                "ORDER BY last_ts DESC",
+                (cutoff,),
+            )
+            rows = cursor.fetchall()
+        skills: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            name = row["skill_name"]
+            if name not in skills:
+                skills[name] = {"skill_name": name, "total_uses": 0, "last_used": 0.0, "event_counts": {}}
+            skills[name]["total_uses"] += row["cnt"]
+            skills[name]["event_counts"][row["event_type"]] = row["cnt"]
+            skills[name]["last_used"] = max(skills[name]["last_used"], row["last_ts"])
+        return sorted(skills.values(), key=lambda s: s["last_used"], reverse=True)
+
+    def get_skill_last_used(self, skill_name: str) -> Optional[float]:
+        """Return the timestamp of the most recent usage of a skill, or None."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT MAX(timestamp) as last_ts FROM skill_usage WHERE skill_name = ?",
+                (skill_name,),
+            )
+            row = cursor.fetchone()
+        return row["last_ts"] if row and row["last_ts"] else None
+
+    def get_skill_rankings(self, limit: int = 50, since_days: Optional[int] = None) -> Dict[str, float]:
+        """Compute usage-based skill scores for ranking in the system prompt.
+
+        Score formula (computed entirely in SQL):
+            score = (uses_30d * 2) + (uses_7d * 5) + recency_bonus
+        where recency_bonus = 10 if last used within 3d, 5 if within 7d, else 0.
+
+        Returns dict of {skill_name: score}.
+        """
+        now = time.time()
+        cutoff_30d = now - (30 * 86400)
+        cutoff_7d = now - (7 * 86400)
+        cutoff_3d = now - (3 * 86400)
+
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                SELECT
+                    skill_name,
+                    COUNT(*) * 2 +
+                    SUM(CASE WHEN timestamp > ? THEN 5 ELSE 0 END) +
+                    CASE
+                        WHEN MAX(timestamp) > ? THEN 10
+                        WHEN MAX(timestamp) > ? THEN 5
+                        ELSE 0
+                    END AS score
+                FROM skill_usage
+                WHERE timestamp > ?
+                GROUP BY skill_name
+                ORDER BY score DESC
+                LIMIT ?
+                """,
+                (cutoff_7d, cutoff_3d, cutoff_7d, cutoff_30d, limit or 50),
+            )
+            rows = cursor.fetchall()
+        return {row["skill_name"]: row["score"] for row in rows}
