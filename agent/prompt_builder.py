@@ -715,7 +715,6 @@ def build_skills_system_prompt(
         )
 
     # External skill directories — scan directly (no snapshot caching).
-    # Local skills take precedence: skip duplicates from external dirs.
     seen_skill_names = {s[0] for s in all_skills}
 
     for ext_dir in external_dirs:
