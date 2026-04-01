@@ -1132,13 +1132,25 @@ class AIAgent:
                 self._user_profile_enabled = False
                 logger.debug("peer %s memory_mode=honcho: local USER.md writes disabled", _hcfg.peer_name or "user")
 
-        # Skills config: nudge interval for skill creation reminders
+        # Skills config: nudge interval, token budget, pinned skills
         self._skill_nudge_interval = 10
+        self._skills_token_budget = 0
+        self._skills_max_prompt = 0
+        self._skills_pinned: list[str] = []
+        self._skills_auto_archive_days = 0
         try:
             skills_config = _agent_cfg.get("skills", {})
             self._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 10))
+            self._skills_token_budget = int(skills_config.get("token_budget", 0))
+            self._skills_max_prompt = int(skills_config.get("max_prompt_skills", 0))
+            self._skills_pinned = list(skills_config.get("pinned_skills", []))
+            self._skills_auto_archive_days = int(skills_config.get("auto_archive_days", 0))
         except Exception:
             pass
+
+        # Auto-archive stale skills at session startup (background thread)
+        if self._skills_auto_archive_days > 0:
+            self._run_skill_auto_archive()
 
         # Tool-use enforcement config: "auto" (default — matches hardcoded
         # model list), true (always), false (never), or list of substrings.
@@ -2534,10 +2546,42 @@ class AIAgent:
             if not self.quiet_mode:
                 print(f"  Honcho write failed: {e}")
 
-    def _build_system_prompt(self, system_message: str = None) -> str:
+    def _run_skill_auto_archive(self) -> None:
+        """Auto-archive skills unused for more than auto_archive_days.
+
+        Runs in a background thread to avoid blocking session startup.
+        """
+        def _do_archive():
+            try:
+                from tools.skill_manager_tool import find_archivable_skills, _archive_skill
+                candidates = find_archivable_skills(
+                    self._skills_auto_archive_days,
+                    pinned=set(self._skills_pinned),
+                )
+                if not candidates:
+                    return
+                archived = 0
+                for name in candidates:
+                    try:
+                        if _archive_skill(name).get("success"):
+                            archived += 1
+                            logger.info("Auto-archived skill '%s'", name)
+                    except Exception as e:
+                        logger.debug("Failed to auto-archive '%s': %s", name, e)
+                if archived:
+                    from agent.prompt_builder import clear_skills_system_prompt_cache
+                    clear_skills_system_prompt_cache(clear_snapshot=True)
+                    logger.info("Auto-archived %d stale skill(s)", archived)
+            except Exception as e:
+                logger.debug("Skill auto-archive failed: %s", e)
+
+        import threading
+        threading.Thread(target=_do_archive, daemon=True).start()
+
+    def _build_system_prompt(self, system_message: str = None, user_message: str = None) -> str:
         """
         Assemble the full system prompt from all layers.
-        
+
         Called once per session (cached on self._cached_system_prompt) and only
         rebuilt after context compression events. This ensures the system prompt
         is stable across all turns in a session, maximizing prefix cache hits.
@@ -2690,9 +2734,24 @@ class AIAgent:
                 )
                 if toolset
             }
+            # Compute usage-based skill scores for smart ranking
+            _skill_scores: dict[str, float] = {}
+            try:
+                if self._session_db:
+                    _skill_scores = self._session_db.get_skill_rankings(limit=100)
+                else:
+                    from hermes_state import SessionDB
+                    _skill_scores = SessionDB().get_skill_rankings(limit=100)
+            except Exception:
+                pass
             skills_prompt = build_skills_system_prompt(
                 available_tools=self.valid_tool_names,
                 available_toolsets=avail_toolsets,
+                token_budget=self._skills_token_budget,
+                max_prompt_skills=self._skills_max_prompt,
+                pinned_skills=self._skills_pinned,
+                skill_scores=_skill_scores or None,
+                user_message=user_message,
             )
         else:
             skills_prompt = ""
@@ -6305,7 +6364,7 @@ class AIAgent:
                 self._cached_system_prompt = stored_prompt
             else:
                 # First turn of a new session — build from scratch.
-                self._cached_system_prompt = self._build_system_prompt(system_message)
+                self._cached_system_prompt = self._build_system_prompt(system_message, user_message=user_message)
                 # Bake Honcho context into the prompt so it's stable for
                 # the entire session (not re-fetched per turn).
                 if self._honcho_context:

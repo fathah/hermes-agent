@@ -4284,12 +4284,29 @@ For more help on a command:
     # config sub-action: interactive enable/disable
     skills_subparsers.add_parser("config", help="Interactive skill configuration — enable/disable individual skills")
 
+    skills_stats = skills_subparsers.add_parser("stats", help="Show skill usage statistics (ranked by usage)")
+    skills_stats.add_argument("--days", type=int, default=None, help="Only show usage from last N days")
+
+    skills_archive_cmd = skills_subparsers.add_parser("archive", help="Archive a skill (move to .archive/)")
+    skills_archive_cmd.add_argument("name", help="Skill name to archive")
+
+    skills_restore_cmd = skills_subparsers.add_parser("restore", help="Restore an archived skill")
+    skills_restore_cmd.add_argument("name", help="Skill name to restore")
+
+    skills_prune_cmd = skills_subparsers.add_parser("prune", help="Bulk archive unused skills")
+    skills_prune_cmd.add_argument("--days", type=int, default=90, help="Archive skills unused for N days (default: 90)")
+    skills_prune_cmd.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
+
     def cmd_skills(args):
+        action = getattr(args, 'skills_action', None)
         # Route 'config' action to skills_config module
-        if getattr(args, 'skills_action', None) == 'config':
+        if action == 'config':
             _require_tty("skills config")
             from hermes_cli.skills_config import skills_command as skills_config_command
             skills_config_command(args)
+        elif action in ('stats', 'archive', 'restore', 'prune'):
+            from hermes_cli.skills_config import skills_overflow_command
+            skills_overflow_command(args)
         else:
             from hermes_cli.skills_hub import skills_command
             skills_command(args)

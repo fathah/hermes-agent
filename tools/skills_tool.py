@@ -84,6 +84,7 @@ from tools.registry import registry
 logger = logging.getLogger(__name__)
 
 
+
 # All skills live in ~/.hermes/skills/ (seeded from bundled skills/ on install).
 # This is the single source of truth -- agent edits, hub installs, and bundled
 # skills all coexist here without polluting the git repo.
@@ -101,7 +102,7 @@ _PLATFORM_MAP = {
     "linux": "linux",
     "windows": "win32",
 }
-_EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
+_EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub", ".archive"))
 _REMOTE_ENV_BACKENDS = frozenset({"docker", "singularity", "modal", "ssh", "daytona"})
 _secret_capture_callback = None
 
@@ -684,7 +685,7 @@ def skills_categories(verbose: bool = False, task_id: str = None) -> str:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
 
-def skills_list(category: str = None, task_id: str = None) -> str:
+def skills_list(category: str = None, task_id: str = None, include_archived: bool = False) -> str:
     """
     List all available skills (progressive disclosure tier 1 - minimal metadata).
 
@@ -694,6 +695,7 @@ def skills_list(category: str = None, task_id: str = None) -> str:
     Args:
         category: Optional category filter (e.g., "mlops")
         task_id: Optional task identifier used to probe the active backend
+        include_archived: If True, also list archived skills (marked with status="archived")
 
     Returns:
         JSON string with minimal skill info: name, description, category
@@ -713,6 +715,23 @@ def skills_list(category: str = None, task_id: str = None) -> str:
 
         # Find all skills
         all_skills = _find_all_skills()
+
+        # Optionally include archived skills
+        if include_archived:
+            archive_dir = SKILLS_DIR / ".archive"
+            if archive_dir.exists():
+                for skill_md in archive_dir.rglob("SKILL.md"):
+                    try:
+                        raw = skill_md.read_text(encoding="utf-8")[:2000]
+                        fm, _ = _parse_frontmatter(raw)
+                        all_skills.append({
+                            "name": fm.get("name", skill_md.parent.name),
+                            "description": fm.get("description", ""),
+                            "category": "archived",
+                            "status": "archived",
+                        })
+                    except Exception:
+                        pass
 
         if not all_skills:
             return json.dumps(
@@ -797,10 +816,12 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                 skill_md = direct_path.with_suffix(".md")
                 break
 
-        # Search by directory name across all dirs
+        # Search by directory name across all dirs (skip archived)
         if not skill_md:
             for search_dir in all_dirs:
                 for found_skill_md in search_dir.rglob("SKILL.md"):
+                    if any(part in _EXCLUDED_SKILL_DIRS for part in found_skill_md.parts):
+                        continue
                     if found_skill_md.parent.name == name:
                         skill_dir = found_skill_md.parent
                         skill_md = found_skill_md
@@ -813,12 +834,26 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             for search_dir in all_dirs:
                 for found_md in search_dir.rglob(f"{name}.md"):
                     if found_md.name != "SKILL.md":
+                        if any(part in _EXCLUDED_SKILL_DIRS for part in found_md.parts):
+                            continue
                         skill_md = found_md
                         break
                 if skill_md:
                     break
 
         if not skill_md or not skill_md.exists():
+            # Fallback: check the archive directory
+            archive_dir = SKILLS_DIR / ".archive" / name
+            if archive_dir.is_dir() and (archive_dir / "SKILL.md").exists():
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": f"Skill '{name}' is archived.",
+                        "hint": "Use skill_manage(action='restore', name='" + name + "') to restore it.",
+                        "archived": True,
+                    },
+                    ensure_ascii=False,
+                )
             available = [s["name"] for s in _find_all_skills()[:20]]
             return json.dumps(
                 {
@@ -1220,6 +1255,11 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         if isinstance(metadata, dict):
             result["metadata"] = metadata
 
+        try:
+            from hermes_state import SessionDB
+            SessionDB().record_skill_usage(skill_name, "view")
+        except Exception:
+            pass
         return json.dumps(result, ensure_ascii=False)
 
     except Exception as e:
@@ -1297,7 +1337,11 @@ SKILLS_LIST_SCHEMA = {
             "category": {
                 "type": "string",
                 "description": "Optional category filter to narrow results",
-            }
+            },
+            "include_archived": {
+                "type": "boolean",
+                "description": "Include archived skills in the list (default: false)",
+            },
         },
         "required": [],
     },
@@ -1327,7 +1371,8 @@ registry.register(
     toolset="skills",
     schema=SKILLS_LIST_SCHEMA,
     handler=lambda args, **kw: skills_list(
-        category=args.get("category"), task_id=kw.get("task_id")
+        category=args.get("category"), task_id=kw.get("task_id"),
+        include_archived=args.get("include_archived", False),
     ),
     check_fn=check_skills_requirements,
     emoji="📚",

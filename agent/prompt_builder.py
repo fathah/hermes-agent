@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -273,6 +274,136 @@ _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 _SKILLS_SNAPSHOT_VERSION = 1
 
 
+_KEYWORD_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "can", "shall", "to", "of", "in", "for",
+    "on", "with", "at", "by", "from", "as", "into", "through", "during",
+    "before", "after", "above", "below", "between", "and", "but", "or",
+    "not", "no", "nor", "so", "yet", "both", "either", "neither", "each",
+    "every", "all", "any", "few", "more", "most", "other", "some", "such",
+    "than", "too", "very", "just", "about", "this", "that", "these", "those",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "they",
+    "them", "what", "which", "who", "when", "where", "how", "why",
+})
+_KEYWORD_STRIP_RE = re.compile(r"[^\w\s-]")
+
+# Suffix stemmer: "debugging" → "debug", "deployment" → "deploy".
+# Only strips if remainder >= 3 chars.
+_STEM_SUFFIXES = (
+    "ation", "ment", "ting", "ing", "ness", "ous", "ive",
+    "ize", "ise", "ful", "less", "able", "ible", "ally",
+    "ily", "ion", "ers", "ler", "est", "ity",
+    "ly", "ed", "er", "es", "al",
+    "s",
+)
+
+# Bridges gaps that stemming can't: "tweet" → "twitter", "bug" → "debug".
+# Only entries where the user's word shares no stem with the skill metadata.
+# Plurals/verb forms are handled by _stem(), don't duplicate them here.
+_SYNONYMS: dict[str, list[str]] = {
+    "tweet": ["twitter", "x"],
+    "toot": ["mastodon"],
+    "post": ["social", "twitter", "blog"],
+    "bug": ["debug", "troubleshoot"],
+    "crash": ["debug", "error", "troubleshoot"],
+    "code": ["programming", "software"],
+    "server": ["linux", "deploy", "infrastructure"],
+    "container": ["docker", "kubernetes", "k8s"],
+    "cluster": ["kubernetes", "k8s"],
+    "cloud": ["aws", "terraform", "deploy"],
+    "ci": ["pipeline", "actions", "cd"],
+    "cd": ["pipeline", "deploy", "ci"],
+    "ai": ["ml", "llm", "model"],
+    "train": ["ml", "pytorch", "finetuning"],
+    "finetune": ["lora", "qlora", "llm"],
+    "vectordb": ["vector", "rag", "pinecone", "chroma", "qdrant"],
+    "website": ["web", "html", "frontend"],
+    "backend": ["api", "server", "fastapi"],
+    "auth": ["authentication", "oauth", "jwt"],
+    "doc": ["documentation", "writing"],
+    "paper": ["research", "arxiv", "academic"],
+    "find": ["search", "locate", "nearby"],
+    "nearby": ["location", "restaurant", "place"],
+    "monitor": ["monitoring", "prometheus", "grafana"],
+    "diagram": ["diagramming", "architecture", "chart"],
+    "test": ["testing", "pytest", "tdd"],
+}
+
+# Merge weights for usage-based scores vs keyword relevance.
+# Relevance is weighted higher so query-relevant skills beat
+# daily-driver habits when the user asks about something specific.
+_USAGE_WEIGHT = 1.0
+_RELEVANCE_WEIGHT = 3.0
+_BASE_SCORE = 0.01
+_HEADER_FOOTER_TOKENS = 80
+
+
+def _stem(word: str) -> str:
+    """Strip common English suffixes, keeping stems >= 3 chars."""
+    for suffix in _STEM_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[:-len(suffix)]
+    return word
+
+
+def _expand_keywords(words: set[str]) -> set[str]:
+    """Expand keywords with stems and synonyms."""
+    expanded = set(words)
+    for word in words:
+        stem = _stem(word)
+        expanded.add(stem)
+        for lookup in (word, stem):
+            if lookup in _SYNONYMS:
+                expanded.update(_SYNONYMS[lookup])
+    return expanded
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~3.5 chars per token for English text."""
+    return max(1, len(text) // 4)
+
+
+def compute_keyword_relevance(
+    user_message: str,
+    skill_entries: "list[dict]",
+) -> dict[str, float]:
+    """Score skills by Jaccard similarity to user message keywords.
+
+    Both sides are expanded with stems and synonyms before matching.
+    Returns {skill_name: 0.0–10.0}.
+    """
+    if not user_message or not skill_entries:
+        return {}
+
+    user_words = set(_KEYWORD_STRIP_RE.sub("", user_message.lower()).split())
+    user_keywords = user_words - _KEYWORD_STOPWORDS
+    if not user_keywords:
+        return {}
+    user_expanded = _expand_keywords(user_keywords)
+
+    scores: dict[str, float] = {}
+    for entry in skill_entries:
+        name = entry.get("skill_name", "")
+        skill_words: set[str] = set()
+        for field in [name, entry.get("description", ""), entry.get("category", "")]:
+            skill_words.update(
+                _KEYWORD_STRIP_RE.sub("", str(field).lower()).replace("-", " ").split()
+            )
+        for tag in entry.get("tags", []):
+            skill_words.update(str(tag).lower().replace("-", " ").split())
+        skill_words -= _KEYWORD_STOPWORDS
+        if not skill_words:
+            continue
+
+        skill_expanded = _expand_keywords(skill_words)
+        matched = user_expanded & skill_expanded
+        if matched:
+            scores[name] = len(matched) / len(user_expanded | skill_expanded) * 10.0
+
+    return scores
+
+
 def _skills_prompt_snapshot_path() -> Path:
     return get_hermes_home() / ".skills_prompt_snapshot.json"
 
@@ -358,6 +489,17 @@ def _build_snapshot_entry(
     if isinstance(platforms, str):
         platforms = [platforms]
 
+    # Extract tags for keyword relevance matching
+    hermes_meta = {}
+    metadata = frontmatter.get("metadata")
+    if isinstance(metadata, dict):
+        hermes_meta = metadata.get("hermes", {}) or {}
+    raw_tags = hermes_meta.get("tags") or frontmatter.get("tags", [])
+    if isinstance(raw_tags, str):
+        raw_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    elif not isinstance(raw_tags, list):
+        raw_tags = []
+
     return {
         "skill_name": skill_name,
         "category": category,
@@ -365,6 +507,7 @@ def _build_snapshot_entry(
         "description": description,
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
+        "tags": [str(t) for t in raw_tags],
     }
 
 
@@ -436,6 +579,12 @@ def _skill_should_show(
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
+    *,
+    token_budget: int = 0,
+    max_prompt_skills: int = 0,
+    pinned_skills: "list[str] | None" = None,
+    skill_scores: "dict[str, float] | None" = None,
+    user_message: str = None,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
@@ -450,20 +599,33 @@ def build_skills_system_prompt(
     scanned alongside the local ``~/.hermes/skills/`` directory.  External dirs
     are read-only — they appear in the index but new skills are always created
     in the local dir.  Local skills take precedence when names collide.
+
+    Args:
+        token_budget: Max tokens for the skills section (0 = unlimited).
+        max_prompt_skills: Hard cap on skill count (0 = unlimited).
+        pinned_skills: Skill names always included regardless of budget.
+        skill_scores: Optional dict of skill_name → score for ranking.
+        user_message: First user message for keyword relevance boosting.
     """
     hermes_home = get_hermes_home()
     skills_dir = hermes_home / "skills"
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
+    pinned = set(pinned_skills or [])
 
     if not skills_dir.exists() and not external_dirs:
         return ""
 
-    # ── Layer 1: in-process LRU cache ─────────────────────────────────
+    _score_bucket = int(time.time()) // 3600
     cache_key = (
         str(skills_dir.resolve()),
         tuple(str(d) for d in external_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
+        token_budget,
+        max_prompt_skills,
+        tuple(sorted(pinned)),
+        _score_bucket,
+        bool(skill_scores),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -476,12 +638,18 @@ def build_skills_system_prompt(
     # ── Layer 2: disk snapshot ────────────────────────────────────────
     snapshot = _load_skills_snapshot(skills_dir)
 
-    skills_by_category: dict[str, list[tuple[str, str]]] = {}
+    # Collect all eligible skills as flat list: (skill_name, description, category)
+    all_skills: list[tuple[str, str, str]] = []
     category_descriptions: dict[str, str] = {}
+
+    # relevance_entries: list of dicts with skill metadata for keyword matching.
+    # Populated from whichever path (snapshot or cold scan) we take.
+    relevance_entries: list[dict] = []
 
     if snapshot is not None:
         # Fast path: use pre-parsed metadata from disk
-        for entry in snapshot.get("skills", []):
+        relevance_entries = snapshot.get("skills", [])
+        for entry in relevance_entries:
             if not isinstance(entry, dict):
                 continue
             skill_name = entry.get("skill_name") or ""
@@ -498,9 +666,7 @@ def build_skills_system_prompt(
                 available_toolsets,
             ):
                 continue
-            skills_by_category.setdefault(category, []).append(
-                (skill_name, entry.get("description", ""))
-            )
+            all_skills.append((skill_name, entry.get("description", ""), category))
         category_descriptions = {
             str(k): str(v)
             for k, v in (snapshot.get("category_descriptions") or {}).items()
@@ -523,9 +689,9 @@ def build_skills_system_prompt(
                 available_toolsets,
             ):
                 continue
-            skills_by_category.setdefault(entry["category"], []).append(
-                (skill_name, entry["description"])
-            )
+            all_skills.append((skill_name, entry["description"], entry["category"]))
+
+        relevance_entries = skill_entries
 
         # Read category-level DESCRIPTION.md files
         for desc_file in iter_skill_index_files(skills_dir, "DESCRIPTION.md"):
@@ -548,14 +714,9 @@ def build_skills_system_prompt(
             category_descriptions,
         )
 
-    # ── External skill directories ─────────────────────────────────────
-    # Scan external dirs directly (no snapshot caching — they're read-only
-    # and typically small).  Local skills already in skills_by_category take
-    # precedence: we track seen names and skip duplicates from external dirs.
-    seen_skill_names: set[str] = set()
-    for cat_skills in skills_by_category.values():
-        for name, _desc in cat_skills:
-            seen_skill_names.add(name)
+    # External skill directories — scan directly (no snapshot caching).
+    # Local skills take precedence: skip duplicates from external dirs.
+    seen_skill_names = {s[0] for s in all_skills}
 
     for ext_dir in external_dirs:
         if not ext_dir.exists():
@@ -578,13 +739,11 @@ def build_skills_system_prompt(
                 ):
                     continue
                 seen_skill_names.add(skill_name)
-                skills_by_category.setdefault(entry["category"], []).append(
-                    (skill_name, entry["description"])
-                )
+                all_skills.append((skill_name, entry["description"], entry["category"]))
+                relevance_entries.append(entry)
             except Exception as e:
                 logger.debug("Error reading external skill %s: %s", skill_file, e)
 
-        # External category descriptions
         for desc_file in iter_skill_index_files(ext_dir, "DESCRIPTION.md"):
             try:
                 content = desc_file.read_text(encoding="utf-8")
@@ -598,26 +757,84 @@ def build_skills_system_prompt(
             except Exception as e:
                 logger.debug("Could not read external skill description %s: %s", desc_file, e)
 
-    if not skills_by_category:
+    if not all_skills:
         result = ""
     else:
+        # Normalize both signals to 0–1 before combining.
+        raw_usage = dict(skill_scores or {})
+        max_usage = max(raw_usage.values()) if raw_usage else 1.0
+
+        relevance: dict[str, float] = {}
+        if user_message and relevance_entries:
+            relevance = compute_keyword_relevance(user_message, relevance_entries)
+
+        merged_scores: dict[str, float] = {}
+        for name, _, _ in all_skills:
+            norm_usage = (raw_usage.get(name, 0.0) / max_usage) if max_usage else 0.0
+            norm_relevance = relevance.get(name, 0.0) / 10.0
+            merged_scores[name] = (
+                _USAGE_WEIGHT * norm_usage
+                + _RELEVANCE_WEIGHT * norm_relevance
+                + _BASE_SCORE
+            )
+
+        all_skills.sort(key=lambda s: (s[0] not in pinned, -merged_scores.get(s[0], _BASE_SCORE), s[0]))
+        total_skill_count = len(all_skills)
+
+        if max_prompt_skills > 0 and len(all_skills) > max_prompt_skills:
+            pinned_list = [s for s in all_skills if s[0] in pinned]
+            non_pinned = [s for s in all_skills if s[0] not in pinned]
+            all_skills = pinned_list + non_pinned[:max(0, max_prompt_skills - len(pinned_list))]
+
+        if token_budget > 0:
+            budget_remaining = token_budget - _HEADER_FOOTER_TOKENS
+            included: list[tuple[str, str, str]] = []
+            seen_categories: set[str] = set()
+
+            for name, desc, cat in all_skills:
+                cat_cost = 0
+                if cat not in seen_categories:
+                    cat_cost = _estimate_tokens(f"  {cat}: {category_descriptions.get(cat, '')}")
+                line_tokens = _estimate_tokens(f"    - {name}: {desc}" if desc else f"    - {name}") + cat_cost
+                if name in pinned or budget_remaining >= line_tokens:
+                    included.append((name, desc, cat))
+                    budget_remaining -= line_tokens
+                    seen_categories.add(cat)
+
+            all_skills = included
+
+        # Flat ranked list when scores drive ordering; grouped by category otherwise.
+        has_scores = bool(skill_scores) or bool(relevance)
         index_lines = []
-        for category in sorted(skills_by_category.keys()):
-            cat_desc = category_descriptions.get(category, "")
-            if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
-            else:
-                index_lines.append(f"  {category}:")
-            # Deduplicate and sort skills within each category
-            seen = set()
-            for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
+        seen: set[str] = set()
+
+        if has_scores:
+            for name, desc, category in all_skills:
                 if name in seen:
                     continue
                 seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
-                else:
-                    index_lines.append(f"    - {name}")
+                index_lines.append(f"    - {name} [{category}]: {desc}" if desc else f"    - {name} [{category}]")
+        else:
+            skills_by_category: dict[str, list[tuple[str, str]]] = {}
+            for name, desc, category in all_skills:
+                skills_by_category.setdefault(category, []).append((name, desc))
+
+            for category in sorted(skills_by_category.keys()):
+                cat_desc = category_descriptions.get(category, "")
+                index_lines.append(f"  {category}: {cat_desc}" if cat_desc else f"  {category}:")
+                for name, desc in skills_by_category[category]:
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    index_lines.append(f"    - {name}: {desc}" if desc else f"    - {name}")
+
+        omitted = total_skill_count - len(all_skills)
+        footer = "If none match, proceed normally without loading a skill."
+        if omitted > 0:
+            footer = (
+                f"[{omitted} additional skill(s) available — "
+                f"use skills_list() to discover them]\n\n" + footer
+            )
 
         result = (
             "## Skills (mandatory)\n"
@@ -632,10 +849,9 @@ def build_skills_system_prompt(
             + "\n".join(index_lines) + "\n"
             "</available_skills>\n"
             "\n"
-            "If none match, proceed normally without loading a skill."
+            + footer
         )
 
-    # ── Store in LRU cache ────────────────────────────────────────────
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)

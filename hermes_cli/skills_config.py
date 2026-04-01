@@ -185,3 +185,130 @@ def skills_command(args=None):
     save_disabled_skills(config, new_disabled, platform)
     enabled_count = len(skills) - len(new_disabled)
     print(color(f"✓ Saved: {enabled_count} enabled, {len(new_disabled)} disabled ({platform_label}).", Colors.GREEN))
+
+
+# ─── Skills Overflow Commands ────────────────────────────────────────────────
+
+def skills_overflow_command(args):
+    """Handle stats/archive/restore/prune subcommands."""
+    action = args.skills_action
+
+    if action == "stats":
+        _cmd_stats(getattr(args, "days", None))
+    elif action == "archive":
+        _cmd_archive(args.name)
+    elif action == "restore":
+        _cmd_restore(args.name)
+    elif action == "prune":
+        _cmd_prune(getattr(args, "days", 90), getattr(args, "yes", False))
+
+
+def _cmd_stats(since_days):
+    """Show skill usage statistics ranked by usage."""
+    import datetime
+
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        stats = db.get_skill_usage_stats(since_days=since_days)
+    except Exception as e:
+        print(color(f"Error loading stats: {e}", Colors.RED))
+        return
+
+    if not stats:
+        period = f"last {since_days} days" if since_days else "all time"
+        print(color(f"No skill usage data found ({period}).", Colors.DIM))
+        print("Usage data is recorded when skills are viewed, invoked, or managed.")
+        return
+
+    period_label = f"last {since_days} days" if since_days else "all time"
+    print(color(f"\nSkill Usage Stats ({period_label})", Colors.BOLD))
+    print(f"{'Skill':<30} {'Uses':>6} {'Last Used':<20} {'Events'}")
+    print("─" * 80)
+
+    for s in stats:
+        name = s["skill_name"][:29]
+        total = s["total_uses"]
+        last_ts = s["last_used"]
+        last_str = datetime.datetime.fromtimestamp(last_ts).strftime("%Y-%m-%d %H:%M") if last_ts else "never"
+        events = ", ".join(f"{k}:{v}" for k, v in sorted(s["event_counts"].items()))
+        print(f"  {name:<28} {total:>6} {last_str:<20} {events}")
+
+    print(f"\n  Total: {len(stats)} skills with recorded usage")
+
+
+def _cmd_archive(name):
+    """Archive a single skill."""
+    from tools.skill_manager_tool import _archive_skill
+    result = _archive_skill(name)
+    if result.get("success"):
+        print(color(f"✓ {result['message']}", Colors.GREEN))
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+    else:
+        print(color(f"✗ {result['error']}", Colors.RED))
+
+
+def _cmd_restore(name):
+    """Restore a single skill from archive."""
+    from tools.skill_manager_tool import _restore_skill
+    result = _restore_skill(name)
+    if result.get("success"):
+        print(color(f"✓ {result['message']}", Colors.GREEN))
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+    else:
+        print(color(f"✗ {result['error']}", Colors.RED))
+        if result.get("archived_skills"):
+            print(f"  Available archived skills: {', '.join(result['archived_skills'])}")
+
+
+def _cmd_prune(days, skip_confirm):
+    """Bulk archive skills unused for more than N days."""
+    from tools.skill_manager_tool import find_archivable_skills, _archive_skill
+
+    config = load_config()
+    pinned = set(config.get("skills", {}).get("pinned_skills", []))
+
+    candidates = find_archivable_skills(days, pinned=pinned)
+
+    if not candidates:
+        print(color(f"No skills unused for >{days} days found.", Colors.DIM))
+        return
+
+    print(color(f"\nSkills unused for >{days} days ({len(candidates)}):", Colors.BOLD))
+    for name in sorted(candidates):
+        print(f"  - {name}")
+
+    if not skip_confirm:
+        try:
+            answer = input(f"\nArchive these {len(candidates)} skills? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+        if answer not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    archived = 0
+    for name in candidates:
+        result = _archive_skill(name)
+        if result.get("success"):
+            print(color(f"  ✓ Archived {name}", Colors.GREEN))
+            archived += 1
+        else:
+            print(color(f"  ✗ {name}: {result.get('error', 'unknown error')}", Colors.RED))
+
+    if archived:
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+    print(f"\nArchived {archived}/{len(candidates)} skills.")
