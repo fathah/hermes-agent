@@ -2,6 +2,18 @@ import { useState, useEffect } from 'react'
 import Markdown from 'react-markdown'
 import { Refresh } from '../assets/icons'
 
+interface FileInfo {
+  content: string
+  exists: boolean
+  lastModified: number | null
+}
+
+interface MemoryData {
+  memory: FileInfo
+  user: FileInfo
+  stats: { totalSessions: number; totalMessages: number }
+}
+
 interface MemoryProps {
   profile?: string
 }
@@ -20,17 +32,13 @@ function formatRelativeTime(ts: number): string {
 }
 
 function Memory({ profile }: MemoryProps): React.JSX.Element {
-  const [content, setContent] = useState('')
-  const [exists, setExists] = useState(false)
-  const [lastModified, setLastModified] = useState<number | null>(null)
+  const [data, setData] = useState<MemoryData | null>(null)
   const [loading, setLoading] = useState(true)
 
   async function loadMemory(): Promise<void> {
     setLoading(true)
     const info = await window.hermesAPI.readMemory(profile)
-    setContent(info.content)
-    setExists(info.exists)
-    setLastModified(info.lastModified)
+    setData(info)
     setLoading(false)
   }
 
@@ -38,7 +46,7 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
     loadMemory()
   }, [profile])
 
-  if (loading) {
+  if (loading || !data) {
     return (
       <div className="memory-container">
         <div className="memory-loading">
@@ -48,13 +56,16 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
     )
   }
 
+  const hasAnyContent = data.memory.exists || data.user.exists
+  const { stats } = data
+
   return (
     <div className="memory-container">
       <div className="memory-header">
         <div>
           <h2 className="memory-title">Memory</h2>
           <p className="memory-subtitle">
-            Persistent knowledge the agent has saved across conversations
+            What the agent remembers about you and past conversations
           </p>
         </div>
         <button className="btn btn-secondary btn-sm" onClick={loadMemory} title="Refresh">
@@ -63,32 +74,88 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
         </button>
       </div>
 
-      {!exists ? (
+      {/* Stats bar */}
+      {(stats.totalSessions > 0 || stats.totalMessages > 0) && (
+        <div className="memory-stats">
+          <div className="memory-stat">
+            <span className="memory-stat-value">{stats.totalSessions}</span>
+            <span className="memory-stat-label">sessions</span>
+          </div>
+          <div className="memory-stat-divider" />
+          <div className="memory-stat">
+            <span className="memory-stat-value">{stats.totalMessages}</span>
+            <span className="memory-stat-label">messages</span>
+          </div>
+          <div className="memory-stat-divider" />
+          <div className="memory-stat">
+            <span className="memory-stat-value">
+              {data.memory.exists ? data.memory.content.split('\n').filter((l) => l.startsWith('- ')).length : 0}
+            </span>
+            <span className="memory-stat-label">memories</span>
+          </div>
+        </div>
+      )}
+
+      {!hasAnyContent ? (
         <div className="memory-empty">
           <div className="memory-empty-icon">
-            <Brain />
+            <BrainIcon />
           </div>
           <p className="memory-empty-text">No memories yet</p>
           <p className="memory-empty-hint">
-            The agent creates memories during conversations to remember important facts, preferences,
-            and context for future sessions.
+            As you chat with Hermes, it automatically saves important facts, your preferences, and
+            useful context to remember across sessions. Start a conversation to build your
+            agent&apos;s memory.
           </p>
         </div>
       ) : (
-        <>
-          {lastModified && (
-            <div className="memory-meta">Last updated {formatRelativeTime(lastModified)}</div>
+        <div className="memory-sections">
+          {/* User Profile section */}
+          {data.user.exists && (
+            <div className="memory-section">
+              <div className="memory-section-header">
+                <span className="memory-section-title">User Profile</span>
+                {data.user.lastModified && (
+                  <span className="memory-meta">
+                    Updated {formatRelativeTime(data.user.lastModified)}
+                  </span>
+                )}
+              </div>
+              <div className="memory-section-hint">
+                What the agent has learned about you from conversations
+              </div>
+              <div className="memory-content">
+                <Markdown>{data.user.content}</Markdown>
+              </div>
+            </div>
           )}
-          <div className="memory-content">
-            <Markdown>{content}</Markdown>
-          </div>
-        </>
+
+          {/* Agent Memory section */}
+          {data.memory.exists && (
+            <div className="memory-section">
+              <div className="memory-section-header">
+                <span className="memory-section-title">Agent Memory</span>
+                {data.memory.lastModified && (
+                  <span className="memory-meta">
+                    Updated {formatRelativeTime(data.memory.lastModified)}
+                  </span>
+                )}
+              </div>
+              <div className="memory-section-hint">
+                Facts and knowledge the agent has saved for future reference
+              </div>
+              <div className="memory-content">
+                <Markdown>{data.memory.content}</Markdown>
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
   )
 }
 
-function Brain(): React.JSX.Element {
+function BrainIcon(): React.JSX.Element {
   return (
     <svg
       width={40}

@@ -82,7 +82,11 @@ interface HermesAPI {
   setActiveProfile: (name: string) => Promise<boolean>
 
   // Memory
-  readMemory: (profile?: string) => Promise<{ content: string; exists: boolean; lastModified: number | null }>
+  readMemory: (profile?: string) => Promise<{
+    memory: { content: string; exists: boolean; lastModified: number | null }
+    user: { content: string; exists: boolean; lastModified: number | null }
+    stats: { totalSessions: number; totalMessages: number }
+  }>
 
   // Soul
   readSoul: (profile?: string) => Promise<string>

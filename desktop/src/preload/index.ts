@@ -128,8 +128,11 @@ const hermesAPI = {
     ipcRenderer.invoke('set-active-profile', name),
 
   // Memory
-  readMemory: (profile?: string): Promise<{ content: string; exists: boolean; lastModified: number | null }> =>
-    ipcRenderer.invoke('read-memory', profile),
+  readMemory: (profile?: string): Promise<{
+    memory: { content: string; exists: boolean; lastModified: number | null }
+    user: { content: string; exists: boolean; lastModified: number | null }
+    stats: { totalSessions: number; totalMessages: number }
+  }> => ipcRenderer.invoke('read-memory', profile),
 
   // Soul
   readSoul: (profile?: string): Promise<string> => ipcRenderer.invoke('read-soul', profile),

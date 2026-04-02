@@ -147,7 +147,7 @@ function Layout(): React.JSX.Element {
               <Moon size={14} />
             </button>
           </div>
-          <div className="sidebar-footer-text">Hermes Agent</div>
+          <div className="sidebar-footer-text">{activeProfile === 'default' ? 'Hermes Agent' : activeProfile}</div>
         </div>
       </aside>
 
@@ -175,7 +175,14 @@ function Layout(): React.JSX.Element {
           />
         )}
         {view === 'agents' && (
-          <Agents activeProfile={activeProfile} onSelectProfile={handleSelectProfile} />
+          <Agents
+            activeProfile={activeProfile}
+            onSelectProfile={handleSelectProfile}
+            onChatWith={(name: string) => {
+              handleSelectProfile(name)
+              setView('chat')
+            }}
+          />
         )}
         {view === 'skills' && <Skills profile={activeProfile} />}
         {view === 'soul' && <Soul profile={activeProfile} />}

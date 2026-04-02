@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, Trash } from '../assets/icons'
+import { Plus, Trash, ChatBubble } from '../assets/icons'
 
 interface ProfileInfo {
   name: string
@@ -17,9 +17,13 @@ interface ProfileInfo {
 interface AgentsProps {
   activeProfile: string
   onSelectProfile: (name: string) => void
+  onChatWith: (name: string) => void
 }
 
-function Agents({ activeProfile, onSelectProfile }: AgentsProps): React.JSX.Element {
+type Tab = 'interactive' | 'manage'
+
+function Agents({ activeProfile, onSelectProfile, onChatWith }: AgentsProps): React.JSX.Element {
+  const [tab, setTab] = useState<Tab>('interactive')
   const [profiles, setProfiles] = useState<ProfileInfo[]>([])
   const [loaded, setLoaded] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
@@ -34,7 +38,6 @@ function Agents({ activeProfile, onSelectProfile }: AgentsProps): React.JSX.Elem
     setLoaded(true)
   }
 
-  // Trigger initial load
   if (!loaded) {
     loadProfiles()
   }
@@ -96,103 +99,181 @@ function Agents({ activeProfile, onSelectProfile }: AgentsProps): React.JSX.Elem
             Each agent is an isolated Hermes instance with its own config, memory, and skills
           </p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
-          <Plus size={14} />
-          New Agent
+      </div>
+
+      {/* Tabs */}
+      <div className="agents-tabs">
+        <button
+          className={`agents-tab ${tab === 'interactive' ? 'active' : ''}`}
+          onClick={() => setTab('interactive')}
+        >
+          Interactive
+        </button>
+        <button
+          className={`agents-tab ${tab === 'manage' ? 'active' : ''}`}
+          onClick={() => setTab('manage')}
+        >
+          Manage
         </button>
       </div>
 
-      {showCreate && (
-        <div className="agents-create">
-          <input
-            className="input"
-            placeholder="Agent name (e.g. coder)"
-            value={newName}
-            onChange={(e) => {
-              const v = e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '')
-              setNewName(v)
-              setError('')
-            }}
-            onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-            autoFocus
-          />
-          <label className="agents-create-clone">
-            <input
-              type="checkbox"
-              checked={cloneConfig}
-              onChange={(e) => setCloneConfig(e.target.checked)}
-            />
-            <span>Clone config &amp; API keys from default</span>
-          </label>
-          {error && <div className="agents-create-error">{error}</div>}
-          <div className="agents-create-actions">
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={handleCreate}
-              disabled={creating || !newName.trim()}
+      {/* ===== Interactive Tab ===== */}
+      {tab === 'interactive' && (
+        <div className="agents-interactive-grid">
+          {profiles.map((p) => (
+            <div
+              key={p.name}
+              className={`agents-interactive-card ${activeProfile === p.name ? 'active' : ''}`}
             >
-              {creating ? 'Creating...' : 'Create'}
-            </button>
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => {
-                setShowCreate(false)
-                setError('')
-              }}
-            >
-              Cancel
-            </button>
-          </div>
+              <div className="agents-interactive-avatar">
+                {p.name === 'default' ? 'H' : p.name.charAt(0).toUpperCase()}
+              </div>
+              <div className="agents-interactive-info">
+                <div className="agents-interactive-name">{p.name}</div>
+                <div className="agents-interactive-model">
+                  {p.model ? p.model.split('/').pop() : 'No model set'}
+                </div>
+                <div className="agents-interactive-meta">
+                  <span>{providerLabel(p.provider)}</span>
+                  <span className="agents-card-dot" />
+                  <span>{p.skillCount} skills</span>
+                  {p.gatewayRunning && (
+                    <>
+                      <span className="agents-card-dot" />
+                      <span className="agents-card-gateway-on">Gateway on</span>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="agents-interactive-actions">
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={() => onChatWith(p.name)}
+                >
+                  <ChatBubble size={14} />
+                  Chat
+                </button>
+                {activeProfile === p.name ? (
+                  <span className="agents-card-active-badge">Active</span>
+                ) : (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleSelect(p.name)}
+                  >
+                    Switch
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
-      <div className="agents-grid">
-        {profiles.map((p) => (
-          <button
-            key={p.name}
-            className={`agents-card ${activeProfile === p.name ? 'active' : ''}`}
-            onClick={() => handleSelect(p.name)}
-          >
-            <div className="agents-card-header">
-              <div className="agents-card-avatar">
-                {p.name === 'default' ? 'H' : p.name.charAt(0).toUpperCase()}
-              </div>
-              <div className="agents-card-info">
-                <div className="agents-card-name">{p.name}</div>
-                <div className="agents-card-provider">{providerLabel(p.provider)}</div>
-              </div>
-              {activeProfile === p.name && <span className="agents-card-active-badge">Active</span>}
-            </div>
+      {/* ===== Manage Tab ===== */}
+      {tab === 'manage' && (
+        <>
+          <div className="agents-manage-toolbar">
+            <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(true)}>
+              <Plus size={14} />
+              New Agent
+            </button>
+          </div>
 
-            <div className="agents-card-model">
-              {p.model ? p.model.split('/').pop() : 'No model set'}
-            </div>
-
-            <div className="agents-card-stats">
-              <span>{p.skillCount} skills</span>
-              <span className="agents-card-dot" />
-              {p.gatewayRunning ? (
-                <span className="agents-card-gateway-on">Gateway running</span>
-              ) : (
-                <span>Gateway off</span>
-              )}
-            </div>
-
-            {!p.isDefault && (
-              <button
-                className="agents-card-delete"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleDelete(p.name)
+          {showCreate && (
+            <div className="agents-create">
+              <input
+                className="input"
+                placeholder="Agent name (e.g. coder)"
+                value={newName}
+                onChange={(e) => {
+                  const v = e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '')
+                  setNewName(v)
+                  setError('')
                 }}
-                title="Delete agent"
+                onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+                autoFocus
+              />
+              <label className="agents-create-clone">
+                <input
+                  type="checkbox"
+                  checked={cloneConfig}
+                  onChange={(e) => setCloneConfig(e.target.checked)}
+                />
+                <span>Clone config &amp; API keys from default</span>
+              </label>
+              {error && <div className="agents-create-error">{error}</div>}
+              <div className="agents-create-actions">
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={handleCreate}
+                  disabled={creating || !newName.trim()}
+                >
+                  {creating ? 'Creating...' : 'Create'}
+                </button>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => {
+                    setShowCreate(false)
+                    setError('')
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="agents-grid">
+            {profiles.map((p) => (
+              <button
+                key={p.name}
+                className={`agents-card ${activeProfile === p.name ? 'active' : ''}`}
+                onClick={() => handleSelect(p.name)}
               >
-                <Trash size={14} />
+                <div className="agents-card-header">
+                  <div className="agents-card-avatar">
+                    {p.name === 'default' ? 'H' : p.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div className="agents-card-info">
+                    <div className="agents-card-name">{p.name}</div>
+                    <div className="agents-card-provider">{providerLabel(p.provider)}</div>
+                  </div>
+                  {activeProfile === p.name && (
+                    <span className="agents-card-active-badge">Active</span>
+                  )}
+                </div>
+
+                <div className="agents-card-model">
+                  {p.model ? p.model.split('/').pop() : 'No model set'}
+                </div>
+
+                <div className="agents-card-stats">
+                  <span>{p.skillCount} skills</span>
+                  <span className="agents-card-dot" />
+                  {p.gatewayRunning ? (
+                    <span className="agents-card-gateway-on">Gateway running</span>
+                  ) : (
+                    <span>Gateway off</span>
+                  )}
+                </div>
+
+                {!p.isDefault && (
+                  <button
+                    className="agents-card-delete"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      handleDelete(p.name)
+                    }}
+                    title="Delete agent"
+                  >
+                    <Trash size={14} />
+                  </button>
+                )}
               </button>
-            )}
-          </button>
-        ))}
-      </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }

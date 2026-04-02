@@ -3,6 +3,14 @@ import Markdown from 'react-markdown'
 import icon from '../assets/icon.png'
 import { Trash, Send, Stop } from '../assets/icons'
 
+function HermesAvatar({ size = 30 }: { size?: number }): React.JSX.Element {
+  return (
+    <div className="chat-avatar chat-avatar-agent">
+      <img src={icon} width={size} height={size} alt="" />
+    </div>
+  )
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'agent'
@@ -151,15 +159,33 @@ function Chat({
           messages.map((msg) => (
             <div key={msg.id} className={`chat-message chat-message-${msg.role}`}>
               {msg.role === 'user' ? (
-                <div className={`chat-avatar chat-avatar-user`}>U</div>
+                <div className="chat-avatar chat-avatar-user">U</div>
               ) : (
-                <div>
-                  <img src={icon} width={30} height={30} alt="" className="chat-avatar-agent" />
-                </div>
+                <HermesAvatar />
               )}
 
               <div className={`chat-bubble chat-bubble-${msg.role}`}>
-                {msg.role === 'agent' ? <Markdown>{msg.content}</Markdown> : msg.content}
+                {msg.role === 'agent' ? (
+                  <Markdown
+                    components={{
+                      a: ({ href, children }) => (
+                        <a
+                          href={href}
+                          onClick={(e) => {
+                            e.preventDefault()
+                            if (href) window.hermesAPI.openExternal(href)
+                          }}
+                        >
+                          {children}
+                        </a>
+                      )
+                    }}
+                  >
+                    {msg.content}
+                  </Markdown>
+                ) : (
+                  msg.content
+                )}
               </div>
             </div>
           ))
@@ -167,7 +193,7 @@ function Chat({
 
         {isLoading && !lastMessageIsAgent && (
           <div className="chat-message chat-message-agent">
-            <div className="chat-avatar chat-avatar-agent">H</div>
+            <HermesAvatar />
             <div className="chat-bubble chat-bubble-agent">
               <div className="chat-typing">
                 <span className="chat-typing-dot" />
