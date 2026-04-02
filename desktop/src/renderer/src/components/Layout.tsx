@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useTheme } from './ThemeProvider'
 import Chat, { ChatMessage } from './Chat'
 import Sessions from './Sessions'
@@ -34,10 +34,26 @@ function Layout(): React.JSX.Element {
   const [activeProfile, setActiveProfile] = useState('default')
 
   const handleNewChat = useCallback(() => {
+    // Abort any in-flight chat before clearing
+    window.hermesAPI.abortChat()
     setMessages([])
     setCurrentSessionId(null)
     setView('chat')
   }, [])
+
+  // Listen for menu IPC events (Cmd+N from app menu)
+  useEffect(() => {
+    const onNewChat = window.electron?.ipcRenderer?.on('menu-new-chat', () => {
+      handleNewChat()
+    })
+    const onSearch = window.electron?.ipcRenderer?.on('menu-search-sessions', () => {
+      setView('sessions')
+    })
+    return () => {
+      onNewChat?.()
+      onSearch?.()
+    }
+  }, [handleNewChat])
 
   const handleSelectProfile = useCallback((name: string) => {
     setActiveProfile(name)
@@ -165,6 +181,7 @@ function Layout(): React.JSX.Element {
             setMessages={setMessages}
             sessionId={currentSessionId}
             profile={activeProfile}
+            onNewChat={handleNewChat}
           />
         </div>
         {view === 'sessions' && (

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
-import Markdown from 'react-markdown'
+import { useState, useEffect, useCallback } from 'react'
 import { Refresh } from '../assets/icons'
+import { AgentMarkdown } from './Chat'
 
 interface FileInfo {
   content: string
@@ -35,16 +35,16 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
   const [data, setData] = useState<MemoryData | null>(null)
   const [loading, setLoading] = useState(true)
 
-  async function loadMemory(): Promise<void> {
+  const loadMemory = useCallback(async (): Promise<void> => {
     setLoading(true)
     const info = await window.hermesAPI.readMemory(profile)
     setData(info)
     setLoading(false)
-  }
+  }, [profile])
 
   useEffect(() => {
     loadMemory()
-  }, [profile])
+  }, [loadMemory])
 
   if (loading || !data) {
     return (
@@ -56,8 +56,9 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
     )
   }
 
-  const hasAnyContent = data.memory.exists || data.user.exists
   const { stats } = data
+  const hasMemoryFiles = data.memory.exists || data.user.exists
+  const hasStats = stats.totalSessions > 0 || stats.totalMessages > 0
 
   return (
     <div className="memory-container">
@@ -74,8 +75,8 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
         </button>
       </div>
 
-      {/* Stats bar */}
-      {(stats.totalSessions > 0 || stats.totalMessages > 0) && (
+      {/* Stats bar — always show if there are sessions */}
+      {hasStats && (
         <div className="memory-stats">
           <div className="memory-stat">
             <span className="memory-stat-value">{stats.totalSessions}</span>
@@ -96,21 +97,9 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
         </div>
       )}
 
-      {!hasAnyContent ? (
-        <div className="memory-empty">
-          <div className="memory-empty-icon">
-            <BrainIcon />
-          </div>
-          <p className="memory-empty-text">No memories yet</p>
-          <p className="memory-empty-hint">
-            As you chat with Hermes, it automatically saves important facts, your preferences, and
-            useful context to remember across sessions. Start a conversation to build your
-            agent&apos;s memory.
-          </p>
-        </div>
-      ) : (
+      {/* Memory file sections */}
+      {hasMemoryFiles && (
         <div className="memory-sections">
-          {/* User Profile section */}
           {data.user.exists && (
             <div className="memory-section">
               <div className="memory-section-header">
@@ -125,12 +114,11 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
                 What the agent has learned about you from conversations
               </div>
               <div className="memory-content">
-                <Markdown>{data.user.content}</Markdown>
+                <AgentMarkdown>{data.user.content}</AgentMarkdown>
               </div>
             </div>
           )}
 
-          {/* Agent Memory section */}
           {data.memory.exists && (
             <div className="memory-section">
               <div className="memory-section-header">
@@ -145,10 +133,41 @@ function Memory({ profile }: MemoryProps): React.JSX.Element {
                 Facts and knowledge the agent has saved for future reference
               </div>
               <div className="memory-content">
-                <Markdown>{data.memory.content}</Markdown>
+                <AgentMarkdown>{data.memory.content}</AgentMarkdown>
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Empty state — only when no memory files AND no stats */}
+      {!hasMemoryFiles && !hasStats && (
+        <div className="memory-empty">
+          <div className="memory-empty-icon">
+            <BrainIcon />
+          </div>
+          <p className="memory-empty-text">No memories yet</p>
+          <p className="memory-empty-hint">
+            As you chat with Hermes, it automatically saves important facts, your preferences, and
+            useful context to remember across sessions. Start a conversation to build your
+            agent&apos;s memory.
+          </p>
+        </div>
+      )}
+
+      {/* Hint when stats exist but no memory files yet */}
+      {!hasMemoryFiles && hasStats && (
+        <div className="memory-empty">
+          <div className="memory-empty-icon">
+            <BrainIcon />
+          </div>
+          <p className="memory-empty-text">No saved memories yet</p>
+          <p className="memory-empty-hint">
+            You have {stats.totalSessions} sessions and {stats.totalMessages} messages, but
+            Hermes hasn&apos;t saved any memories to MEMORY.md or USER.md yet. This happens
+            automatically as the agent learns important facts about you and your preferences.
+            Make sure the <strong>memory</strong> toolset is enabled in Tools.
+          </p>
         </div>
       )}
     </div>

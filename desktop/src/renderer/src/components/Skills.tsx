@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
-import Markdown from 'react-markdown'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Search, X, Download, Trash, Refresh } from '../assets/icons'
+import { AgentMarkdown } from './Chat'
 
 interface InstalledSkill {
   name: string
@@ -46,15 +46,15 @@ function Skills({ profile }: SkillsProps): React.JSX.Element {
     setBundledSkills(list)
   }
 
-  async function loadAll(): Promise<void> {
+  const loadAll = useCallback(async (): Promise<void> => {
     setLoading(true)
     await Promise.all([loadInstalled(), loadBundled()])
     setLoading(false)
-  }
+  }, [profile])
 
   useEffect(() => {
     loadAll()
-  }, [profile])
+  }, [loadAll])
 
   async function handleViewDetail(skill: InstalledSkill): Promise<void> {
     setDetailSkill(skill)
@@ -162,7 +162,7 @@ function Skills({ profile }: SkillsProps): React.JSX.Element {
               </div>
             </div>
             <div className="skills-detail-content">
-              <Markdown>{detailContent}</Markdown>
+              <AgentMarkdown>{detailContent}</AgentMarkdown>
             </div>
           </div>
         </div>

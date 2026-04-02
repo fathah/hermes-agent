@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import Markdown from 'react-markdown'
 import icon from '../assets/icon.png'
-import { Trash, Send, Stop } from '../assets/icons'
+import { Trash, Send, Stop, Plus } from '../assets/icons'
 
 function HermesAvatar({ size = 30 }: { size?: number }): React.JSX.Element {
   return (
@@ -10,6 +10,31 @@ function HermesAvatar({ size = 30 }: { size?: number }): React.JSX.Element {
     </div>
   )
 }
+
+// Shared Markdown renderer that opens links externally
+function AgentMarkdown({ children }: { children: string }): React.JSX.Element {
+  return (
+    <Markdown
+      components={{
+        a: ({ href, children }) => (
+          <a
+            href={href}
+            onClick={(e) => {
+              e.preventDefault()
+              if (href) window.hermesAPI.openExternal(href)
+            }}
+          >
+            {children}
+          </a>
+        )
+      }}
+    >
+      {children}
+    </Markdown>
+  )
+}
+
+export { AgentMarkdown }
 
 export interface ChatMessage {
   id: string
@@ -23,6 +48,7 @@ interface ChatProps {
   sessionId: string | null
   profile?: string
   onSessionStarted?: () => void
+  onNewChat?: () => void
 }
 
 function Chat({
@@ -30,17 +56,23 @@ function Chat({
   setMessages,
   sessionId,
   profile,
-  onSessionStarted
+  onSessionStarted,
+  onNewChat
 }: ChatProps): React.JSX.Element {
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const isLoadingRef = useRef(false)
+
+  // Keep ref in sync for use in IPC callbacks
+  isLoadingRef.current = isLoading
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
 
+  // IPC listeners — stable callback refs, registered once
   useEffect(() => {
     const cleanupChunk = window.hermesAPI.onChatChunk((chunk) => {
       setMessages((prev) => {
@@ -81,6 +113,18 @@ function Chat({
     }
   }, [isLoading])
 
+  // Keyboard shortcut: Cmd+N for new chat
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent): void {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
+        e.preventDefault()
+        if (onNewChat) onNewChat()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onNewChat])
+
   async function handleSend(): Promise<void> {
     const text = input.trim()
     if (!text || isLoading) return
@@ -119,6 +163,17 @@ function Chat({
   function handleAbort(): void {
     window.hermesAPI.abortChat()
     setIsLoading(false)
+    // Refocus input after aborting
+    setTimeout(() => inputRef.current?.focus(), 50)
+  }
+
+  function handleClear(): void {
+    // Abort any in-flight request before clearing
+    if (isLoading) {
+      window.hermesAPI.abortChat()
+      setIsLoading(false)
+    }
+    setMessages([])
   }
 
   const lastMessageIsAgent = messages.length > 0 && messages[messages.length - 1].role === 'agent'
@@ -129,27 +184,32 @@ function Chat({
         <div className="chat-header-title">
           {sessionId ? `Session ${sessionId.slice(-6)}` : 'New Chat'}
         </div>
-        {messages.length > 0 && (
-          <button
-            className="btn-ghost chat-clear-btn"
-            onClick={() => setMessages([])}
-            title="Clear chat"
-          >
-            <Trash size={16} />
-          </button>
-        )}
+        <div className="chat-header-actions">
+          {onNewChat && (
+            <button
+              className="btn-ghost chat-clear-btn"
+              onClick={onNewChat}
+              title="New chat (Cmd+N)"
+            >
+              <Plus size={16} />
+            </button>
+          )}
+          {messages.length > 0 && (
+            <button
+              className="btn-ghost chat-clear-btn"
+              onClick={handleClear}
+              title="Clear chat"
+            >
+              <Trash size={16} />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="chat-messages">
         {messages.length === 0 ? (
           <div className="chat-empty">
-            <img
-              src={icon}
-              width={48}
-              height={48}
-              alt=""
-              style={{ opacity: 0.8, marginBottom: 8, borderRadius: 8 }}
-            />
+            <HermesAvatar size={48} />
             <div className="chat-empty-text">How can I help you today?</div>
             <div className="chat-empty-hint">
               Ask me to write code, answer questions, search the web, and more
@@ -166,23 +226,7 @@ function Chat({
 
               <div className={`chat-bubble chat-bubble-${msg.role}`}>
                 {msg.role === 'agent' ? (
-                  <Markdown
-                    components={{
-                      a: ({ href, children }) => (
-                        <a
-                          href={href}
-                          onClick={(e) => {
-                            e.preventDefault()
-                            if (href) window.hermesAPI.openExternal(href)
-                          }}
-                        >
-                          {children}
-                        </a>
-                      )
-                    }}
-                  >
-                    {msg.content}
-                  </Markdown>
+                  <AgentMarkdown>{msg.content}</AgentMarkdown>
                 ) : (
                   msg.content
                 )}

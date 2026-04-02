@@ -36,8 +36,9 @@ function isNoiseLine(line: string): boolean {
   if (/^\(and \d+ more/.test(t)) return true
   // Session metadata
   if (/^Session:|^session_id:|^Resume this session|^hermes --resume|^Duration:|^Messages:/.test(t)) return true
-  // Status lines
+  // Status lines and warnings
   if (/^Query:|^Initializing agent/.test(t)) return true
+  if (/^Warning: Unknown toolsets?:/.test(t)) return true
   // Hermes response box header/footer
   if (/⚕\s*Hermes/.test(t)) return true
   return false
