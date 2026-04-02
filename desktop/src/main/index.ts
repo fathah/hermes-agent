@@ -13,8 +13,18 @@ import {
   getModelConfig,
   setModelConfig
 } from './config'
-import { listSessions, getSessionMessages } from './sessions'
+import { listSessions, getSessionMessages, searchSessions } from './sessions'
 import { listProfiles, createProfile, deleteProfile, setActiveProfile } from './profiles'
+import { readMemory } from './memory'
+import { readSoul, writeSoul, resetSoul } from './soul'
+import { getToolsets, setToolsetEnabled } from './tools'
+import {
+  listInstalledSkills,
+  listBundledSkills,
+  getSkillContent,
+  installSkill,
+  uninstallSkill
+} from './skills'
 
 let mainWindow: BrowserWindow | null = null
 let currentChatAbort: (() => void) | null = null
@@ -160,6 +170,32 @@ function setupIPC(): void {
     setActiveProfile(name)
     return true
   })
+
+  // Memory
+  ipcMain.handle('read-memory', (_event, profile?: string) => readMemory(profile))
+
+  // Soul
+  ipcMain.handle('read-soul', (_event, profile?: string) => readSoul(profile))
+  ipcMain.handle('write-soul', (_event, content: string, profile?: string) => {
+    return writeSoul(content, profile)
+  })
+  ipcMain.handle('reset-soul', (_event, profile?: string) => resetSoul(profile))
+
+  // Tools
+  ipcMain.handle('get-toolsets', (_event, profile?: string) => getToolsets(profile))
+  ipcMain.handle('set-toolset-enabled', (_event, key: string, enabled: boolean, profile?: string) => {
+    return setToolsetEnabled(key, enabled, profile)
+  })
+
+  // Skills
+  ipcMain.handle('list-installed-skills', (_event, profile?: string) => listInstalledSkills(profile))
+  ipcMain.handle('list-bundled-skills', () => listBundledSkills())
+  ipcMain.handle('get-skill-content', (_event, skillPath: string) => getSkillContent(skillPath))
+  ipcMain.handle('install-skill', (_event, identifier: string, profile?: string) => installSkill(identifier, profile))
+  ipcMain.handle('uninstall-skill', (_event, name: string, profile?: string) => uninstallSkill(name, profile))
+
+  // Session search
+  ipcMain.handle('search-sessions', (_event, query: string, limit?: number) => searchSessions(query, limit))
 
   // Shell
   ipcMain.handle('open-external', (_event, url: string) => {

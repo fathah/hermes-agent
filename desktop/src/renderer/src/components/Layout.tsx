@@ -4,6 +4,10 @@ import Chat, { ChatMessage } from './Chat'
 import Sessions from './Sessions'
 import Agents from './Agents'
 import Settings from './Settings'
+import Skills from './Skills'
+import Soul from './Soul'
+import Memory from './Memory'
+import Tools from './Tools'
 import hermeslogo from '../assets/hermes.png'
 import {
   ChatBubble,
@@ -12,10 +16,14 @@ import {
   Settings as SettingsIcon,
   Sun,
   Monitor,
-  Moon
+  Moon,
+  Puzzle,
+  Sparkles,
+  Brain,
+  Wrench
 } from '../assets/icons'
 
-type View = 'chat' | 'sessions' | 'agents' | 'settings'
+type View = 'chat' | 'sessions' | 'agents' | 'skills' | 'soul' | 'memory' | 'tools' | 'settings'
 
 function Layout(): React.JSX.Element {
   const [view, setView] = useState<View>('chat')
@@ -77,6 +85,34 @@ function Layout(): React.JSX.Element {
           >
             <Bot />
             Agents
+          </button>
+          <button
+            className={`sidebar-nav-item ${view === 'skills' ? 'active' : ''}`}
+            onClick={() => setView('skills')}
+          >
+            <Puzzle />
+            Skills
+          </button>
+          <button
+            className={`sidebar-nav-item ${view === 'soul' ? 'active' : ''}`}
+            onClick={() => setView('soul')}
+          >
+            <Sparkles />
+            Persona
+          </button>
+          <button
+            className={`sidebar-nav-item ${view === 'memory' ? 'active' : ''}`}
+            onClick={() => setView('memory')}
+          >
+            <Brain />
+            Memory
+          </button>
+          <button
+            className={`sidebar-nav-item ${view === 'tools' ? 'active' : ''}`}
+            onClick={() => setView('tools')}
+          >
+            <Wrench />
+            Tools
           </button>
           <button
             className={`sidebar-nav-item ${view === 'settings' ? 'active' : ''}`}
@@ -141,6 +177,10 @@ function Layout(): React.JSX.Element {
         {view === 'agents' && (
           <Agents activeProfile={activeProfile} onSelectProfile={handleSelectProfile} />
         )}
+        {view === 'skills' && <Skills profile={activeProfile} />}
+        {view === 'soul' && <Soul profile={activeProfile} />}
+        {view === 'memory' && <Memory profile={activeProfile} />}
+        {view === 'tools' && <Tools profile={activeProfile} />}
         {view === 'settings' && <Settings profile={activeProfile} />}
       </main>
     </div>

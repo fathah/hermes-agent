@@ -77,7 +77,6 @@ const PROVIDER_OPTIONS = [
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'openai', label: 'OpenAI' },
-  { value: 'groq', label: 'Groq' },
   { value: 'custom', label: 'Local / Custom' }
 ]
 
@@ -183,7 +182,7 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
     }
   }
 
-  const isCustomProvider = modelProvider === 'custom' || modelProvider === 'groq'
+  const isCustomProvider = modelProvider === 'custom'
 
   return (
     <div className="settings-container">
@@ -224,8 +223,6 @@ function Settings({ profile }: { profile?: string }): React.JSX.Element {
               setModelProvider(v)
               if (v === 'custom' && !modelBaseUrl) {
                 setModelBaseUrl('http://localhost:1234/v1')
-              } else if (v === 'groq') {
-                setModelBaseUrl('https://api.groq.com/openai/v1')
               }
             }}
           >

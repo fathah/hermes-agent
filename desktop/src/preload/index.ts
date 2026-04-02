@@ -127,6 +127,50 @@ const hermesAPI = {
   setActiveProfile: (name: string): Promise<boolean> =>
     ipcRenderer.invoke('set-active-profile', name),
 
+  // Memory
+  readMemory: (profile?: string): Promise<{ content: string; exists: boolean; lastModified: number | null }> =>
+    ipcRenderer.invoke('read-memory', profile),
+
+  // Soul
+  readSoul: (profile?: string): Promise<string> => ipcRenderer.invoke('read-soul', profile),
+  writeSoul: (content: string, profile?: string): Promise<boolean> =>
+    ipcRenderer.invoke('write-soul', content, profile),
+  resetSoul: (profile?: string): Promise<string> => ipcRenderer.invoke('reset-soul', profile),
+
+  // Tools
+  getToolsets: (profile?: string): Promise<
+    Array<{ key: string; label: string; description: string; enabled: boolean }>
+  > => ipcRenderer.invoke('get-toolsets', profile),
+  setToolsetEnabled: (key: string, enabled: boolean, profile?: string): Promise<boolean> =>
+    ipcRenderer.invoke('set-toolset-enabled', key, enabled, profile),
+
+  // Skills
+  listInstalledSkills: (profile?: string): Promise<
+    Array<{ name: string; category: string; description: string; path: string }>
+  > => ipcRenderer.invoke('list-installed-skills', profile),
+  listBundledSkills: (): Promise<
+    Array<{ name: string; description: string; category: string; source: string; installed: boolean }>
+  > => ipcRenderer.invoke('list-bundled-skills'),
+  getSkillContent: (skillPath: string): Promise<string> =>
+    ipcRenderer.invoke('get-skill-content', skillPath),
+  installSkill: (identifier: string, profile?: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('install-skill', identifier, profile),
+  uninstallSkill: (name: string, profile?: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('uninstall-skill', name, profile),
+
+  // Session search
+  searchSessions: (query: string, limit?: number): Promise<
+    Array<{
+      sessionId: string
+      title: string | null
+      startedAt: number
+      source: string
+      messageCount: number
+      model: string
+      snippet: string
+    }>
+  > => ipcRenderer.invoke('search-sessions', query, limit),
+
   // Shell
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open-external', url)
 }

@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { HERMES_HOME, HERMES_REPO, HERMES_PYTHON, HERMES_SCRIPT, getEnhancedPath } from './installer'
-import { getModelConfig } from './config'
+import { getModelConfig, readEnv } from './config'
 
 function stripAnsi(str: string): string {
   return str
@@ -50,11 +50,11 @@ export function sendMessage(
   onError: (error: string) => void,
   profile?: string
 ): ChatHandle {
-  const mc = getModelConfig()
+  // Read config from the correct profile
+  const mc = getModelConfig(profile)
+  const profileEnv = readEnv(profile)
 
-  // Use non-quiet mode so streaming works — we filter the noise ourselves
   const args = [HERMES_SCRIPT]
-  // Pass profile flag before subcommand (hermes -p <name> chat ...)
   if (profile && profile !== 'default') {
     args.push('-p', profile)
   }
@@ -74,7 +74,6 @@ export function sendMessage(
 
   // Map provider → env var for API key
   const PROVIDER_KEY_MAP: Record<string, string> = {
-    groq: 'GROQ_API_KEY',
     custom: 'OPENAI_API_KEY',
     lmstudio: '', ollama: '', vllm: '', llamacpp: ''
   }
@@ -84,9 +83,9 @@ export function sendMessage(
     env.HERMES_INFERENCE_PROVIDER = 'custom'
     env.OPENAI_BASE_URL = mc.baseUrl.replace(/\/+$/, '')
 
-    // Resolve the correct API key for this provider
+    // Resolve the correct API key — check profile .env first, then process env
     const keyEnvVar = PROVIDER_KEY_MAP[mc.provider]
-    const resolvedKey = keyEnvVar ? (env[keyEnvVar] || '') : 'no-key-required'
+    const resolvedKey = keyEnvVar ? (profileEnv[keyEnvVar] || env[keyEnvVar] || '') : 'no-key-required'
     env.OPENAI_API_KEY = resolvedKey || 'no-key-required'
 
     // Remove cloud provider keys so auto-detection doesn't override

@@ -39,18 +39,6 @@ const PROVIDERS = [
     needsKey: true
   },
   {
-    id: 'groq',
-    name: 'Groq',
-    desc: 'Ultra-fast inference',
-    tag: 'Free tier',
-    envKey: 'GROQ_API_KEY',
-    url: 'https://console.groq.com/keys',
-    placeholder: 'gsk_...',
-    configProvider: 'custom',
-    baseUrl: 'https://api.groq.com/openai/v1',
-    needsKey: true
-  },
-  {
     id: 'local',
     name: 'Local LLM',
     desc: 'LM Studio, Ollama, etc.',

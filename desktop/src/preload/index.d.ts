@@ -81,6 +81,44 @@ interface HermesAPI {
   deleteProfile: (name: string) => Promise<{ success: boolean; error?: string }>
   setActiveProfile: (name: string) => Promise<boolean>
 
+  // Memory
+  readMemory: (profile?: string) => Promise<{ content: string; exists: boolean; lastModified: number | null }>
+
+  // Soul
+  readSoul: (profile?: string) => Promise<string>
+  writeSoul: (content: string, profile?: string) => Promise<boolean>
+  resetSoul: (profile?: string) => Promise<string>
+
+  // Tools
+  getToolsets: (profile?: string) => Promise<
+    Array<{ key: string; label: string; description: string; enabled: boolean }>
+  >
+  setToolsetEnabled: (key: string, enabled: boolean, profile?: string) => Promise<boolean>
+
+  // Skills
+  listInstalledSkills: (profile?: string) => Promise<
+    Array<{ name: string; category: string; description: string; path: string }>
+  >
+  listBundledSkills: () => Promise<
+    Array<{ name: string; description: string; category: string; source: string; installed: boolean }>
+  >
+  getSkillContent: (skillPath: string) => Promise<string>
+  installSkill: (identifier: string, profile?: string) => Promise<{ success: boolean; error?: string }>
+  uninstallSkill: (name: string, profile?: string) => Promise<{ success: boolean; error?: string }>
+
+  // Session search
+  searchSessions: (query: string, limit?: number) => Promise<
+    Array<{
+      sessionId: string
+      title: string | null
+      startedAt: number
+      source: string
+      messageCount: number
+      model: string
+      snippet: string
+    }>
+  >
+
   // Shell
   openExternal: (url: string) => Promise<void>
 }

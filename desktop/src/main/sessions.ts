@@ -23,6 +23,16 @@ export interface SessionMessage {
   timestamp: number
 }
 
+export interface SearchResult {
+  sessionId: string
+  title: string | null
+  startedAt: number
+  source: string
+  messageCount: number
+  model: string
+  snippet: string
+}
+
 function getDb(): Database.Database | null {
   if (!existsSync(DB_PATH)) return null
   return new Database(DB_PATH, { readonly: true })
@@ -75,6 +85,71 @@ export function listSessions(limit = 30, offset = 0): SessionSummary[] {
       title: r.title,
       preview: r.preview
     }))
+  } finally {
+    db.close()
+  }
+}
+
+export function searchSessions(query: string, limit = 20): SearchResult[] {
+  const db = getDb()
+  if (!db) return []
+
+  try {
+    // Check if FTS table exists
+    const tableCheck = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='messages_fts'")
+      .get() as { name: string } | undefined
+
+    if (!tableCheck) return []
+
+    // Sanitize query for FTS5: wrap each word with quotes for safety, add * for prefix
+    const sanitized = query
+      .trim()
+      .split(/\s+/)
+      .filter((w) => w.length > 0)
+      .map((w) => `"${w.replace(/"/g, '')}"*`)
+      .join(' ')
+
+    if (!sanitized) return []
+
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT
+          m.session_id,
+          s.title,
+          s.started_at,
+          s.source,
+          s.message_count,
+          s.model,
+          snippet(messages_fts, 0, '<<', '>>', '...', 40) as snippet
+        FROM messages_fts
+        JOIN messages m ON m.id = messages_fts.rowid
+        JOIN sessions s ON s.id = m.session_id
+        WHERE messages_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?`
+      )
+      .all(sanitized, limit) as Array<{
+      session_id: string
+      title: string | null
+      started_at: number
+      source: string
+      message_count: number
+      model: string
+      snippet: string
+    }>
+
+    return rows.map((r) => ({
+      sessionId: r.session_id,
+      title: r.title,
+      startedAt: r.started_at,
+      source: r.source,
+      messageCount: r.message_count,
+      model: r.model || '',
+      snippet: r.snippet || ''
+    }))
+  } catch {
+    return []
   } finally {
     db.close()
   }
