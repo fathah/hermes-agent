@@ -33,7 +33,7 @@ Set your provider with `hermes model` or by editing `~/.hermes/.env`. See the [E
 **Yes!** Hermes Agent runs natively on Windows. Install via PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/fathah/hermes-agent/windows-support/scripts/install.ps1 | iex
 ```
 
 Alternatively, you can use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) for a Linux experience on Windows.

@@ -37,7 +37,7 @@ Works on Linux, macOS, Windows, and WSL2. The installer handles everything — P
 
 > **Windows:** Native Windows is supported. Install via PowerShell:
 > ```powershell
-> irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+> irm https://raw.githubusercontent.com/fathah/hermes-agent/windows-support/scripts/install.ps1 | iex
 > ```
 > Alternatively, you can use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and run the bash command above.
 
