@@ -5173,15 +5173,24 @@ For more help on a command:
             print(f"Resuming session: {selected_id}")
             import shutil
             hermes_bin = shutil.which("hermes")
-            if hermes_bin:
-                os.execvp(hermes_bin, ["hermes", "--resume", selected_id])
+            if sys.platform == "win32":
+                # os.execvp() is not available on Windows; use subprocess instead
+                import subprocess as _sp
+                if hermes_bin:
+                    rc = _sp.call([hermes_bin, "--resume", selected_id])
+                else:
+                    rc = _sp.call([sys.executable, "-m", "hermes_cli.main", "--resume", selected_id])
+                sys.exit(rc)
             else:
-                # Fallback: re-invoke via python -m
-                os.execvp(
-                    sys.executable,
-                    [sys.executable, "-m", "hermes_cli.main", "--resume", selected_id],
-                )
-            return  # won't reach here after execvp
+                if hermes_bin:
+                    os.execvp(hermes_bin, ["hermes", "--resume", selected_id])
+                else:
+                    # Fallback: re-invoke via python -m
+                    os.execvp(
+                        sys.executable,
+                        [sys.executable, "-m", "hermes_cli.main", "--resume", selected_id],
+                    )
+            return  # won't reach here after execvp / sys.exit
 
         elif action == "stats":
             total = db.session_count()

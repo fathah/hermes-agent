@@ -95,6 +95,14 @@ class TestHermesToolsGeneration(unittest.TestCase):
         self.assertIn("def _connect(", src)
         self.assertIn("def _call(", src)
 
+    def test_tcp_transport_infrastructure(self):
+        src = generate_hermes_tools_module(["terminal"], transport="tcp")
+        self.assertIn("HERMES_RPC_PORT", src)
+        self.assertIn("AF_INET", src)
+        self.assertIn("def _connect(", src)
+        self.assertIn("def _call(", src)
+        self.assertNotIn("AF_UNIX", src)
+
     def test_convenience_helpers_present(self):
         """Verify json_parse, shell_quote, and retry helpers are generated."""
         src = generate_hermes_tools_module(["terminal"])
@@ -104,7 +112,6 @@ class TestHermesToolsGeneration(unittest.TestCase):
         self.assertIn("import json, os, socket, shlex, time", src)
 
 
-@unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestExecuteCode(unittest.TestCase):
     """Integration tests using the mock dispatcher."""
 
@@ -535,7 +542,6 @@ class TestBuildExecuteCodeSchema(unittest.TestCase):
 # Environment variable filtering (security critical)
 # ---------------------------------------------------------------------------
 
-@unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestEnvVarFiltering(unittest.TestCase):
     """Verify that execute_code filters environment variables correctly.
 
@@ -604,9 +610,12 @@ class TestEnvVarFiltering(unittest.TestCase):
         child_env = self._get_child_env()
         self.assertIn("HOME", child_env)
 
-    def test_hermes_rpc_socket_injected(self):
+    def test_hermes_rpc_connection_injected(self):
         child_env = self._get_child_env()
-        self.assertIn("HERMES_RPC_SOCKET", child_env)
+        if sys.platform == "win32":
+            self.assertIn("HERMES_RPC_PORT", child_env)
+        else:
+            self.assertIn("HERMES_RPC_SOCKET", child_env)
 
     def test_pythondontwritebytecode_set(self):
         child_env = self._get_child_env()
@@ -640,19 +649,17 @@ class TestEnvVarFiltering(unittest.TestCase):
 
 class TestExecuteCodeEdgeCases(unittest.TestCase):
 
-    def test_windows_returns_error(self):
-        """On Windows (or when SANDBOX_AVAILABLE is False), returns error JSON."""
+    def test_sandbox_disabled_returns_error(self):
+        """When SANDBOX_AVAILABLE is False, returns error JSON."""
         with patch("tools.code_execution_tool.SANDBOX_AVAILABLE", False):
             result = json.loads(execute_code("print('hi')", task_id="test"))
             self.assertIn("error", result)
-            self.assertIn("Windows", result["error"])
 
     def test_whitespace_only_code(self):
         result = json.loads(execute_code("   \n\t  ", task_id="test"))
         self.assertIn("error", result)
         self.assertIn("No code", result["error"])
 
-    @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
     def test_none_enabled_tools_uses_all(self):
         """When enabled_tools is None, all sandbox tools should be available."""
         code = (
@@ -666,7 +673,6 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertIn("all imports ok", result["output"])
 
-    @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
     def test_empty_enabled_tools_uses_all(self):
         """When enabled_tools is [] (empty), all sandbox tools should be available."""
         code = (
@@ -680,7 +686,6 @@ class TestExecuteCodeEdgeCases(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertIn("imports ok", result["output"])
 
-    @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
     def test_nonoverlapping_tools_fallback(self):
         """When enabled_tools has no overlap with SANDBOX_ALLOWED_TOOLS,
         should fall back to all allowed tools."""
@@ -722,7 +727,6 @@ class TestLoadConfig(unittest.TestCase):
 # Interrupt event
 # ---------------------------------------------------------------------------
 
-@unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestInterruptHandling(unittest.TestCase):
     def test_interrupt_event_stops_execution(self):
         """When _interrupt_event is set, execute_code should stop the script."""

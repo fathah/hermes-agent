@@ -364,10 +364,16 @@ class LocalEnvironment(PersistentShellMixin, BaseEnvironment):
         if self._shell_pid is None:
             return
         try:
-            subprocess.run(
-                ["pkill", "-P", str(self._shell_pid)],
-                capture_output=True, timeout=5,
-            )
+            if _IS_WINDOWS:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(self._shell_pid)],
+                    capture_output=True, timeout=5,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-P", str(self._shell_pid)],
+                    capture_output=True, timeout=5,
+                )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 

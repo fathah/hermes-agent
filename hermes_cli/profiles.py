@@ -645,7 +645,10 @@ def _stop_gateway_process(profile_dir: Path) -> None:
                 return
         # Force kill
         try:
-            os.kill(pid, _signal.SIGKILL)
+            if sys.platform == "win32":
+                os.kill(pid, _signal.SIGTERM)
+            else:
+                os.kill(pid, _signal.SIGKILL)
         except ProcessLookupError:
             pass
         print(f"✓ Gateway force-stopped (PID {pid})")

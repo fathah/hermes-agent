@@ -2147,9 +2147,10 @@ def _kill_orphaned_mcp_children() -> None:
         pids = list(_stdio_pids)
         _stdio_pids.clear()
 
+    _is_win = os.name == "nt"
     for pid in pids:
         try:
-            os.kill(pid, _signal.SIGKILL)
+            os.kill(pid, _signal.SIGTERM if _is_win else _signal.SIGKILL)
             logger.debug("Force-killed orphaned MCP stdio process %d", pid)
         except (ProcessLookupError, PermissionError, OSError):
             pass  # Already exited or inaccessible

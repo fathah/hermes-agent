@@ -7352,7 +7352,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                     existing_pid,
                 )
                 try:
-                    os.kill(existing_pid, signal.SIGKILL)
+                    if sys.platform == "win32":
+                        os.kill(existing_pid, signal.SIGTERM)
+                    else:
+                        os.kill(existing_pid, signal.SIGKILL)
                     _time.sleep(0.5)
                 except (ProcessLookupError, PermissionError):
                     pass

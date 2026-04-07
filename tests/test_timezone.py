@@ -131,7 +131,6 @@ class TestGetTimezone:
 # execute_code child env — TZ injection
 # =========================================================================
 
-@pytest.mark.skipif(sys.platform == "win32", reason="UDS not available on Windows")
 class TestCodeExecutionTZ:
     """Verify TZ env var is passed to sandboxed child process via real execute_code."""
 
