@@ -586,6 +586,11 @@ class MatrixAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Download an image URL and upload it to Matrix."""
+        from tools.url_safety import is_safe_url
+        if not is_safe_url(image_url):
+            logger.warning("Matrix: blocked unsafe image URL (SSRF protection)")
+            return await super().send_image(chat_id, image_url, caption, reply_to, metadata=metadata)
+
         try:
             # Try aiohttp first (always available), fall back to httpx
             try:
@@ -1057,7 +1062,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
         # Message type.
         msg_type = MessageType.TEXT
-        if body.startswith("!") or body.startswith("/"):
+        if body.startswith(("!", "/")):
             msg_type = MessageType.COMMAND
 
         source = self.build_source(

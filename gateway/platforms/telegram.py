@@ -153,6 +153,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._dm_topics_config: List[Dict[str, Any]] = self.config.extra.get("dm_topics", [])
         # Interactive model picker state per chat
         self._model_picker_state: Dict[str, dict] = {}
+        # Approval button state: message_id → session_key
+        self._approval_state: Dict[int, str] = {}
 
     def _fallback_ips(self) -> list[str]:
         """Return validated fallback IPs from config (populated by _apply_env_overrides)."""
@@ -1010,6 +1012,70 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_update_prompt failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    async def send_exec_approval(
+        self, chat_id: str, command: str, session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an inline-keyboard approval prompt with interactive buttons.
+
+        The buttons call ``resolve_gateway_approval()`` to unblock the waiting
+        agent thread — same mechanism as the text ``/approve`` flow.
+        """
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
+            text = (
+                f"⚠️ *Command Approval Required*\n\n"
+                f"`{cmd_preview}`\n\n"
+                f"Reason: {description}"
+            )
+
+            # Resolve thread context for thread replies
+            thread_id = None
+            if metadata:
+                thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
+
+            # We'll use the message_id as part of callback_data to look up session_key
+            # Send a placeholder first, then update — or use a counter.
+            # Simpler: use a monotonic counter to generate short IDs.
+            import itertools
+            if not hasattr(self, "_approval_counter"):
+                self._approval_counter = itertools.count(1)
+            approval_id = next(self._approval_counter)
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
+                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}"),
+                ],
+                [
+                    InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}"),
+                    InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"),
+                ],
+            ])
+
+            kwargs: Dict[str, Any] = {
+                "chat_id": int(chat_id),
+                "text": text,
+                "parse_mode": ParseMode.MARKDOWN,
+                "reply_markup": keyboard,
+            }
+            if thread_id:
+                kwargs["message_thread_id"] = int(thread_id)
+
+            msg = await self._bot.send_message(**kwargs)
+
+            # Store session_key keyed by approval_id for the callback handler
+            self._approval_state[approval_id] = session_key
+
+            return SendResult(success=True, message_id=str(msg.message_id))
+        except Exception as e:
+            logger.warning("[%s] send_exec_approval failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
     async def send_model_picker(
         self,
         chat_id: str,
@@ -1321,6 +1387,56 @@ class TelegramAdapter(BasePlatformAdapter):
                 await self._handle_model_picker_callback(query, data, chat_id)
             return
 
+        # --- Exec approval callbacks (ea:choice:id) ---
+        if data.startswith("ea:"):
+            parts = data.split(":", 2)
+            if len(parts) == 3:
+                choice = parts[1]  # once, session, always, deny
+                try:
+                    approval_id = int(parts[2])
+                except (ValueError, IndexError):
+                    await query.answer(text="Invalid approval data.")
+                    return
+
+                session_key = self._approval_state.pop(approval_id, None)
+                if not session_key:
+                    await query.answer(text="This approval has already been resolved.")
+                    return
+
+                # Map choice to human-readable label
+                label_map = {
+                    "once": "✅ Approved once",
+                    "session": "✅ Approved for session",
+                    "always": "✅ Approved permanently",
+                    "deny": "❌ Denied",
+                }
+                user_display = getattr(query.from_user, "first_name", "User")
+                label = label_map.get(choice, "Resolved")
+
+                await query.answer(text=label)
+
+                # Edit message to show decision, remove buttons
+                try:
+                    await query.edit_message_text(
+                        text=f"{label} by {user_display}",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass  # non-fatal if edit fails
+
+                # Resolve the approval — unblocks the agent thread
+                try:
+                    from tools.approval import resolve_gateway_approval
+                    count = resolve_gateway_approval(session_key, choice)
+                    logger.info(
+                        "Telegram button resolved %d approval(s) for session %s (choice=%s, user=%s)",
+                        count, session_key, choice, user_display,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+            return
+
         # --- Update prompt callbacks ---
         if not data.startswith("update_prompt:"):
             return
@@ -1369,7 +1485,7 @@ class TelegramAdapter(BasePlatformAdapter):
             
             with open(audio_path, "rb") as audio_file:
                 # .ogg files -> send as voice (round playable bubble)
-                if audio_path.endswith(".ogg") or audio_path.endswith(".opus"):
+                if audio_path.endswith((".ogg", ".opus")):
                     _voice_thread = metadata.get("thread_id") if metadata else None
                     msg = await self._bot.send_voice(
                         chat_id=int(chat_id),
@@ -1516,7 +1632,12 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        
+
+        from tools.url_safety import is_safe_url
+        if not is_safe_url(image_url):
+            logger.warning("[%s] Blocked unsafe image URL (SSRF protection)", self.name)
+            return await super().send_image(chat_id, image_url, caption, reply_to, metadata=metadata)
+
         try:
             # Telegram can send photos directly from URLs (up to ~5MB)
             _photo_thread = metadata.get("thread_id") if metadata else None
@@ -2106,10 +2227,7 @@ class TelegramAdapter(BasePlatformAdapter):
             existing.media_urls.extend(event.media_urls)
             existing.media_types.extend(event.media_types)
             if event.text:
-                if not existing.text:
-                    existing.text = event.text
-                elif event.text not in existing.text:
-                    existing.text = f"{existing.text}\n\n{event.text}".strip()
+                existing.text = self._merge_caption(existing.text, event.text)
 
         prior_task = self._pending_photo_batch_tasks.get(batch_key)
         if prior_task and not prior_task.done():
@@ -2299,11 +2417,7 @@ class TelegramAdapter(BasePlatformAdapter):
             existing.media_urls.extend(event.media_urls)
             existing.media_types.extend(event.media_types)
             if event.text:
-                if existing.text:
-                    if event.text not in existing.text.split("\n\n"):
-                        existing.text = f"{existing.text}\n\n{event.text}"
-                else:
-                    existing.text = event.text
+                existing.text = self._merge_caption(existing.text, event.text)
 
         prior_task = self._media_group_tasks.get(media_group_id)
         if prior_task:
@@ -2559,3 +2673,46 @@ class TelegramAdapter(BasePlatformAdapter):
             auto_skill=topic_skill,
             timestamp=message.date,
         )
+
+    # ── Message reactions (processing lifecycle) ──────────────────────────
+
+    def _reactions_enabled(self) -> bool:
+        """Check if message reactions are enabled via config/env."""
+        return os.getenv("TELEGRAM_REACTIONS", "false").lower() not in ("false", "0", "no")
+
+    async def _set_reaction(self, chat_id: str, message_id: str, emoji: str) -> bool:
+        """Set a single emoji reaction on a Telegram message."""
+        if not self._bot:
+            return False
+        try:
+            await self._bot.set_message_reaction(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                reaction=emoji,
+            )
+            return True
+        except Exception as e:
+            logger.debug("[%s] set_message_reaction failed (%s): %s", self.name, emoji, e)
+            return False
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        """Add an in-progress reaction when message processing begins."""
+        if not self._reactions_enabled():
+            return
+        chat_id = getattr(event.source, "chat_id", None)
+        message_id = getattr(event, "message_id", None)
+        if chat_id and message_id:
+            await self._set_reaction(chat_id, message_id, "\U0001f440")
+
+    async def on_processing_complete(self, event: MessageEvent, success: bool) -> None:
+        """Swap the in-progress reaction for a final success/failure reaction.
+
+        Unlike Discord (additive reactions), Telegram's set_message_reaction
+        replaces all existing reactions in one call — no remove step needed.
+        """
+        if not self._reactions_enabled():
+            return
+        chat_id = getattr(event.source, "chat_id", None)
+        message_id = getattr(event, "message_id", None)
+        if chat_id and message_id:
+            await self._set_reaction(chat_id, message_id, "\u2705" if success else "\u274c")

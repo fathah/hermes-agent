@@ -27,7 +27,6 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
-from hermes_cli.config import get_hermes_home
 from hermes_constants import get_hermes_dir
 
 
@@ -125,7 +124,14 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
 
     Returns:
         Absolute path to the cached image file as a string.
+
+    Raises:
+        ValueError: If the URL targets a private/internal network (SSRF protection).
     """
+    from tools.url_safety import is_safe_url
+    if not is_safe_url(url):
+        raise ValueError(f"Blocked unsafe URL (SSRF protection): {_safe_url_for_log(url)}")
+
     import asyncio
     import httpx
     import logging as _logging
@@ -233,7 +239,14 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
 
     Returns:
         Absolute path to the cached audio file as a string.
+
+    Raises:
+        ValueError: If the URL targets a private/internal network (SSRF protection).
     """
+    from tools.url_safety import is_safe_url
+    if not is_safe_url(url):
+        raise ValueError(f"Blocked unsafe URL (SSRF protection): {_safe_url_for_log(url)}")
+
     import asyncio
     import httpx
     import logging as _logging
@@ -485,6 +498,9 @@ class BasePlatformAdapter(ABC):
         self._background_tasks: set[asyncio.Task] = set()
         # Chats where auto-TTS on voice input is disabled (set by /voice off)
         self._auto_tts_disabled_chats: set = set()
+        # Chats where typing indicator is paused (e.g. during approval waits).
+        # _keep_typing skips send_typing when the chat_id is in this set.
+        self._typing_paused: set = set()
 
     @property
     def has_fatal_error(self) -> bool:
@@ -944,10 +960,16 @@ class BasePlatformAdapter(ABC):
         
         Telegram/Discord typing status expires after ~5 seconds, so we refresh every 2
         to recover quickly after progress messages interrupt it.
+        
+        Skips send_typing when the chat is in ``_typing_paused`` (e.g. while
+        the agent is waiting for dangerous-command approval).  This is critical
+        for Slack's Assistant API where ``assistant_threads_setStatus`` disables
+        the compose box — pausing lets the user type ``/approve`` or ``/deny``.
         """
         try:
             while True:
-                await self.send_typing(chat_id, metadata=metadata)
+                if chat_id not in self._typing_paused:
+                    await self.send_typing(chat_id, metadata=metadata)
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             pass  # Normal cancellation when handler completes
@@ -961,7 +983,20 @@ class BasePlatformAdapter(ABC):
                     await self.stop_typing(chat_id)
                 except Exception:
                     pass
-    
+            self._typing_paused.discard(chat_id)
+
+    def pause_typing_for_chat(self, chat_id: str) -> None:
+        """Pause typing indicator for a chat (e.g. during approval waits).
+
+        Thread-safe (CPython GIL) — can be called from the sync agent thread
+        while ``_keep_typing`` runs on the async event loop.
+        """
+        self._typing_paused.add(chat_id)
+
+    def resume_typing_for_chat(self, chat_id: str) -> None:
+        """Resume typing indicator for a chat after approval resolves."""
+        self._typing_paused.discard(chat_id)
+
     # ── Processing lifecycle hooks ──────────────────────────────────────────
     # Subclasses override these to react to message processing events
     # (e.g. Discord adds 👀/✅/❌ reactions).
@@ -1084,6 +1119,22 @@ class BasePlatformAdapter(ABC):
             logger.error("[%s] Fallback send also failed: %s", self.name, fallback_result.error)
         return fallback_result
 
+    @staticmethod
+    def _merge_caption(existing_text: Optional[str], new_text: str) -> str:
+        """Merge a new caption into existing text, avoiding duplicates.
+
+        Uses line-by-line exact match (not substring) to prevent false positives
+        where a shorter caption is silently dropped because it appears as a
+        substring of a longer one (e.g. "Meeting" inside "Meeting agenda").
+        Whitespace is normalised for comparison.
+        """
+        if not existing_text:
+            return new_text
+        existing_captions = [c.strip() for c in existing_text.split("\n\n")]
+        if new_text.strip() not in existing_captions:
+            return f"{existing_text}\n\n{new_text}".strip()
+        return existing_text
+
     async def handle_message(self, event: MessageEvent) -> None:
         """
         Process an incoming message.
@@ -1143,10 +1194,7 @@ class BasePlatformAdapter(ABC):
                     existing.media_urls.extend(event.media_urls)
                     existing.media_types.extend(event.media_types)
                     if event.text:
-                        if not existing.text:
-                            existing.text = event.text
-                        elif event.text not in existing.text:
-                            existing.text = f"{existing.text}\n\n{event.text}".strip()
+                        existing.text = self._merge_caption(existing.text, event.text)
                 else:
                     self._pending_messages[session_key] = event
                 return  # Don't interrupt now - will run after current task completes
